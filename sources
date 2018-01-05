@@ -1,0 +1,6 @@
+TARGETNAME=hookssdt
+TARGETTYPE=DRIVER
+TARGETPATH=obj
+SOURCES=mydriver.c
+UMTYPE=console
+UMENTRY=DriverEntry

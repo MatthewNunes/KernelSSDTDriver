@@ -1,0 +1,1 @@
+mydriver.c(410) : error C4013: 'RtlAppendUnicodeString' undefined; assuming extern returning int
