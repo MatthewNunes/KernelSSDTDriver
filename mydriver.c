@@ -29,9 +29,10 @@
 
 //typedef NTSTATUS (*ZWQUERYINFORMATIONTHREAD)(HANDLE,ULONG,PVOID,ULONG,PULONG);
 typedef NTSTATUS (*ZWQUERYINFORMATIONPROCESS)(HANDLE,PROCESSINFOCLASS,PVOID,ULONG,PULONG);
+typedef NTSTATUS (*ZWQUERYINFORMATIONTHREAD)(HANDLE,THREADINFOCLASS,PVOID,ULONG,PULONG);
 typedef NTSTATUS (*ZwQueryInformationFilePtr)(HANDLE, PIO_STATUS_BLOCK,PVOID,ULONG,FILE_INFORMATION_CLASS);
 
-//ZWQUERYINFORMATIONTHREAD ZwQueryInformationThread;
+ZWQUERYINFORMATIONTHREAD ZwQueryInformationThread;
 ZWQUERYINFORMATIONPROCESS ZwQueryInformationProcess;
 
 
@@ -1816,6 +1817,9 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT  pDriverObject, PUNICODE_STRING  pRegistryPa
 		RtlInitUnicodeString(&function, L"ZwQueryInformationProcess");
 		ZwQueryInformationProcess = MmGetSystemRoutineAddress(&function);
 		
+		RtlInitUnicodeString(&function, L"ZwQueryInformationThread");
+		ZwQueryInformationThread = MmGetSystemRoutineAddress(&function);
+		
 		//RtlInitUnicodeString(&buddyName, L"\\Device\\FileWriterDriver");
 		//IoGetDeviceObjectPointer(&buddyName, GENERIC_ALL, &fObject, &buddyDevice);
 		
@@ -2349,15 +2353,16 @@ NTSTATUS newZwSetValueKey(
 	  
 }
 */
-/*
+
 ULONG getTIDByHandle(HANDLE hThread)
 {
 	THREAD_BASIC_INFORMATION teb;
 	NTSTATUS ntStatus;
 	PEPROCESS process = NULL;
+	ULONG lastTimeImDoThis = 1234567890L;
 	
 	if(hThread) {
-		ntStatus = ZwQueryInformationThread(hThread, 0, &teb, sizeof(teb), NULL);
+		ntStatus = ZwQueryInformationThread(hThread, 0, &teb, sizeof(teb), &lastTimeImDoThis);
 		if(NT_SUCCESS(ntStatus)) {
 			//PsLookupProcessByProcessId(teb.ClientId.UniqueProcess, process);
 			//DbgPrint("getTIDByHandle %S\n:", (BYTE *)process+0x174);
@@ -2373,7 +2378,7 @@ ULONG getTIDByHandle(HANDLE hThread)
 	
 	return 0;
 }
-*/
+
 ULONG getPIDByHandle(HANDLE hProc)
 {
 	PROCESS_BASIC_INFORMATION peb;
@@ -2440,27 +2445,29 @@ NTSTATUS getPIDByThreadHandle(HANDLE hThread, PUNICODE_STRING ProcessImageName)
     //
     // Now lets go get the data
     //
-    status = ZwQueryInformationProcess( NtCurrentProcess(), 
+    status = ZwQueryInformationProcess( hThread, 
                                         ProcessImageFileName,
                                         buffer,
                                         returnedLength,
                                         &returnedLength);
 
     if (NT_SUCCESS(status)) {
-        //
-        // Ah, we got what we needed
-        //
-        imageName = (PUNICODE_STRING) buffer;
+		if (NULL != buffer) {
+			//
+			// Ah, we got what we needed
+			//
+			imageName = (PUNICODE_STRING) buffer;
 
-        RtlCopyUnicodeString(ProcessImageName, imageName);
-        
+			RtlCopyUnicodeString(ProcessImageName, imageName);
+        }
     }
 
     //
     // free our buffer
     //
-    ExFreePool(buffer);
-
+	if (NULL != buffer) {
+		ExFreePool(buffer);
+	}
     //
     // And tell the caller what happened.
     //    
@@ -2478,6 +2485,7 @@ NTSTATUS getFilenameByHandle(HANDLE hFile, PUNICODE_STRING FileName)
 	PIO_STATUS_BLOCK ioStatusBlock;
 	UNICODE_STRING routineName;
 	ZwQueryInformationFilePtr ZwQueryInformationFile = NULL;
+	status = STATUS_ALERTED;
 	
 	PAGED_CODE(); // this eliminates the possibility of the IDLE Thread/Process
 	
@@ -2495,39 +2503,42 @@ NTSTATUS getFilenameByHandle(HANDLE hFile, PUNICODE_STRING FileName)
     }
 	
 	ioStatusBlock = (PIO_STATUS_BLOCK)ExAllocatePoolWithTag(PagedPool, sizeof(IO_STATUS_BLOCK), 'stat');
-	buffer = (PFILE_NAME_INFORMATION)ExAllocatePoolWithTag(PagedPool, sizeof(FILE_NAME_INFORMATION) + (150 * sizeof(WCHAR)), 'sdfs');
+	buffer = (PFILE_NAME_INFORMATION)ExAllocatePoolWithTag(PagedPool, sizeof(FILE_NAME_INFORMATION) + (350 * sizeof(WCHAR)), 'sdfs');
     //
     // Now lets go get the data
     //
     status = ZwQueryInformationFile(hFile, 
                                 ioStatusBlock,
                                 buffer,
-                                sizeof(FILE_NAME_INFORMATION) + (150 * sizeof(WCHAR)),
+                                sizeof(FILE_NAME_INFORMATION) + (350 * sizeof(WCHAR)),
                                 FileNameInformation);
 
 	//FileName->Buffer = buffer->FileName;
-    if (NT_SUCCESS(status)) {
-        //
-        // Ah, we got what we needed
-        //
-        //DbgPrint("This was successful! \r\n");
-		memcpy(FileName->Buffer,
-		&(buffer->FileName[0]),
-		buffer->FileNameLength);
-		//FileName->Length = buffer->FileNameLength;
-		FileName->Length = (SHORT)buffer->FileNameLength;
-//		buffer->FileNameLength = (SHORT)FileName->Length;
-		//RtlLongToShort(buffer->FileNameLength, &(FileName->Length));
-		//DbgPrint("Copied memory: %wZ length: %lu original:%S \r\n", FileName, buffer->FileNameLength, &buffer->FileName);
-        
-    }
-	else {
+    if (buffer != NULL) {
+		if (NT_SUCCESS(status)) {
+			//
+			// Ah, we got what we needed
+			//
+			//DbgPrint("This was successful! \r\n");
+			RtlCopyMemory(FileName->Buffer,
+			&(buffer->FileName[0]),
+			buffer->FileNameLength);
+			//FileName->Length = buffer->FileNameLength;
+			FileName->Length = (SHORT)buffer->FileNameLength;
+	//		buffer->FileNameLength = (SHORT)FileName->Length;
+			//RtlLongToShort(buffer->FileNameLength, &(FileName->Length));
+			//DbgPrint("Copied memory: %wZ length: %lu original:%S \r\n", FileName, buffer->FileNameLength, &buffer->FileName);
+			
+		}
+		else {
+		}
+		ExFreePool(buffer);
 	}
 	//ENDS HERE
-
-	ExFreePool(ioStatusBlock);
-	ExFreePool(buffer);
-
+	if (ioStatusBlock != NULL){
+		ExFreePool(ioStatusBlock);
+	}
+		
     //
     // And tell the caller what happened.
     //    
@@ -2681,12 +2692,12 @@ NTSTATUS newZwOpenProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -2778,12 +2789,12 @@ NTSTATUS newZwWriteVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID 
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -2864,12 +2875,12 @@ NTSTATUS newZwReadVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID B
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -2946,12 +2957,12 @@ NTSTATUS newZwDebugActiveProcess(HANDLE ProcessHandle, HANDLE DebugHandle) {
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3027,12 +3038,12 @@ NTSTATUS newZwCreateSection (PHANDLE SectionHandle,ACCESS_MASK DesiredAccess,POB
 	UNICODE_STRING uTime = {0};
 	
 	ANSI_STRING ansiTime;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3110,12 +3121,12 @@ NTSTATUS newZwCreateProcess(PHANDLE ProcessHandle,ACCESS_MASK DesiredAccess,POBJ
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3192,12 +3203,12 @@ NTSTATUS newZwCreateProcessEx(PHANDLE ProcessHandle,ACCESS_MASK DesiredAccess,PO
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3274,12 +3285,12 @@ NTSTATUS newZwQueueApcThread(HANDLE ThreadHandle,PIO_APC_ROUTINE ApcRoutine,PVOI
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3356,12 +3367,12 @@ NTSTATUS newZwCreateThread(PHANDLE ThreadHandle,ACCESS_MASK DesiredAccess,POBJEC
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3438,12 +3449,12 @@ NTSTATUS newZwCreateThreadEx(PHANDLE ThreadHandle,ACCESS_MASK DesiredAccess,POBJ
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3522,7 +3533,7 @@ NTSTATUS newZwMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -3530,7 +3541,7 @@ NTSTATUS newZwMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwMapViewOfSection \r\n");
@@ -3620,7 +3631,7 @@ NTSTATUS newZwSetContextThread(HANDLE ThreadHandle, PCONTEXT Context){
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -3628,7 +3639,7 @@ NTSTATUS newZwSetContextThread(HANDLE ThreadHandle, PCONTEXT Context){
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwSetContextThread \r\n");
@@ -3718,12 +3729,12 @@ NTSTATUS newZwSystemDebugControl(SYSDBG_COMMAND Command, PVOID InputBuffer, ULON
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -3820,7 +3831,7 @@ NTSTATUS newZwOpenFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 		return oldZwOpenFile(FileHandle,DesiredAccess,ObjectAttributes,IoStatusBlock,ShareAccess,OpenOptions);
 	}
 	else {		
-		uProcess.MaximumLength = 150 * sizeof(WCHAR);
+		uProcess.MaximumLength = 250 * sizeof(WCHAR);
 		uFullString.MaximumLength = 950 * sizeof(WCHAR);
 		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'ofpr');
 		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'offu');
@@ -3832,7 +3843,7 @@ NTSTATUS newZwOpenFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 		
 		
 		//RtlInitEmptyUnicodeString(&uFullString, fullString, sizeof(WCHAR) * 950);
-		//RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+		//RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		
 		//DbgPrint("File: %wZ\r\n", ObjectAttributes->ObjectName);
 		checkString = L"\\SystemRoot\\d";
@@ -3914,7 +3925,7 @@ NTSTATUS newZwCreateFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	
@@ -3928,7 +3939,7 @@ NTSTATUS newZwCreateFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	uFullString.Buffer = fullString;
 	
 	//RtlInitEmptyUnicodeString(&uFullString, fullString, sizeof(WCHAR) * 950);
-	//RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	//RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	
 	timeIncrement = KeQueryTimeIncrement();
 	KeQueryTickCount(&currTimeStamp);
@@ -4005,7 +4016,7 @@ NTSTATUS newZwReadFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRouti
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -4013,7 +4024,7 @@ NTSTATUS newZwReadFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRouti
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwReadFile \r\n");
@@ -4106,12 +4117,12 @@ NTSTATUS newZwDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes) {
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4190,12 +4201,12 @@ NTSTATUS newZwSetInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlo
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4274,12 +4285,12 @@ NTSTATUS newZwCreateMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4362,7 +4373,7 @@ NTSTATUS newZwDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTI
 	ANSI_STRING ansiTime;
 	
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -4371,7 +4382,7 @@ NTSTATUS newZwDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTI
 	uFullString.Length = 0;
 	counter+=1;
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwDeviceIoControlFile \r\n");
@@ -4414,7 +4425,7 @@ NTSTATUS newZwDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDeviceIoControlFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,IoControlCode,InputBuffer,InputBufferLength,OuputBuffer,OutputBufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDeviceIoControlFile.txt\0");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -4464,12 +4475,12 @@ NTSTATUS newZwTerminateProcess(HANDLE ProcessHandle, NTSTATUS ExitStatus) {
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4549,12 +4560,12 @@ NTSTATUS newZwResumeThread(HANDLE ThreadHandle, PULONG SuspendCount){
 	ANSI_STRING ansiTime;
 	
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4633,12 +4644,12 @@ NTSTATUS newZwLoadDriver(PUNICODE_STRING DriverServiceName){
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4699,7 +4710,7 @@ NTSTATUS newZwLoadDriver(PUNICODE_STRING DriverServiceName){
 */
 NTSTATUS newZwDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER DelayInterval){
 	NTSTATUS ntStatus;
-	WCHAR processString[150] = {0};
+	WCHAR processString[250] = {0};
 	WCHAR fullString[950] = {0};
 	PWCHAR timeBuffer;
 	PWCHAR pidBuffer;
@@ -4716,7 +4727,7 @@ NTSTATUS newZwDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER DelayInterval){
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -4725,7 +4736,7 @@ NTSTATUS newZwDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER DelayInterval){
 	uFullString.Length = 0;
 	
 	RtlInitEmptyUnicodeString(&uFullString, fullString, sizeof(fullString));
-	RtlInitEmptyUnicodeString(&uProcess, processString, 150 * sizeof(WCHAR));
+	RtlInitEmptyUnicodeString(&uProcess, processString, 250 * sizeof(WCHAR));
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
 	
 	uPid.Buffer = pidBuffer;
@@ -4789,12 +4800,12 @@ NTSTATUS newZwQueryValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, KEY_VAL
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4873,12 +4884,12 @@ NTSTATUS newZwQueryAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE_BAS
 	PIO_STACK_LOCATION stackLoc;
 	PIRP Irp;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4958,13 +4969,13 @@ NTSTATUS newZwAcceptConnectPort(PHANDLE PortHandle, ULONG PortIdentifier, PPORT_
 	ANSI_STRING ansiTime;
 	
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	counter+=1;
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	
 	uProcess.Buffer = processString;
@@ -4995,7 +5006,7 @@ NTSTATUS newZwAcceptConnectPort(PHANDLE PortHandle, ULONG PortIdentifier, PPORT_
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAcceptConnectPort(PortHandle,PortIdentifier,Message,Accept,WriteSection,ReadSection);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAcceptConnectPort.txt\0");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5043,7 +5054,7 @@ NTSTATUS newZwWaitForSingleObject(HANDLE Handle, BOOLEAN Alertable, PLARGE_INTEG
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5052,7 +5063,7 @@ NTSTATUS newZwWaitForSingleObject(HANDLE Handle, BOOLEAN Alertable, PLARGE_INTEG
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwWaitForSingleObject \r\n");
@@ -5094,7 +5105,7 @@ NTSTATUS newZwWaitForSingleObject(HANDLE Handle, BOOLEAN Alertable, PLARGE_INTEG
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwWaitForSingleObject(Handle,Alertable,Timeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWaitForSingleObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n");
@@ -5129,7 +5140,7 @@ NTSTATUS newZwReplyWaitReceivePort(HANDLE PortHandle, PULONG PortIdentifier, PPO
 	
 	ANSI_STRING ansiTime;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5139,7 +5150,7 @@ NTSTATUS newZwReplyWaitReceivePort(HANDLE PortHandle, PULONG PortIdentifier, PPO
 	counter+=1;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwReplyWaitReceivePort \r\n");
@@ -5181,7 +5192,7 @@ NTSTATUS newZwReplyWaitReceivePort(HANDLE PortHandle, PULONG PortIdentifier, PPO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReplyWaitReceivePort(PortHandle,PortIdentifier,ReplyMessage,Message);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReplyWaitReceivePort.txt\0");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5232,7 +5243,7 @@ NTSTATUS newZwRequestWaitReplyPort(HANDLE PortHandle, PPORT_MESSAGE RequestMessa
 	
 	ANSI_STRING ansiTime = {0};
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5241,7 +5252,7 @@ NTSTATUS newZwRequestWaitReplyPort(HANDLE PortHandle, PPORT_MESSAGE RequestMessa
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwRequestWaitReplyPort \r\n");
@@ -5279,7 +5290,7 @@ NTSTATUS newZwRequestWaitReplyPort(HANDLE PortHandle, PPORT_MESSAGE RequestMessa
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRequestWaitReplyPort(PortHandle,RequestMessage,ReplyMessage);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRequestWaitReplyPort.txt\0");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5317,6 +5328,7 @@ NTSTATUS newZwClose(HANDLE Handle){
 	PWCHAR timeBuffer;
 	PWCHAR nameBuffer;
 	PWCHAR pidBuffer;
+	PWCHAR compareBuffer;
 	ULONG pid;
 	
 	LARGE_INTEGER mSec, currTimeStamp;
@@ -5332,43 +5344,51 @@ NTSTATUS newZwClose(HANDLE Handle){
 	UNICODE_STRING uTime = {0};
 	UNICODE_STRING uName = {0};
 	UNICODE_STRING uPid= {0};
+	UNICODE_STRING compareString = {0};
 	
 	ANSI_STRING ansiTime;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
-	uName.MaximumLength = 150 * sizeof(WCHAR);
+	uName.MaximumLength = 350 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
+	compareString.MaximumLength = 100 * sizeof(WCHAR);
 	
 	uPid.Length = 0;	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	uName.Length = 0;
+	compareString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwClose \r\n");
 		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 550, 'icfs');
 	}
-	nameBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'kwjl');
+	nameBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 350, 'kwjl');
+	compareBuffer = (PWCHAR)ExAllocatePool(PagedPool, sizeof(WCHAR) * 100);
 	
 	uProcess.Buffer = processString;
 	uFullString.Buffer = fullString;
 	uName.Buffer = nameBuffer;
 	uPid.Buffer = pidBuffer;
+	compareString.Buffer = compareBuffer;
+	
+	RtlAppendUnicodeToString(&compareString, L"\\WINDOWS\\d\\");
 	
 	filenameStatus = getFilenameByHandle(Handle, &uName);
 	expectedLength = sizeof(WCHAR) * 27;
 	//DbgPrint("ObjectAttributes: %wZ \r\n", ObjectAttributes->ObjectName);
 	if (filenameStatus == STATUS_SUCCESS) {
-		expectedLength = memcmp(uName.Buffer, L"\\WINDOWS\\d\\", sizeof(WCHAR) * 10); 
+		expectedLength = RtlCompareMemory(uName.Buffer, compareString.Buffer, sizeof(WCHAR) * 10); 
 	}
-	if ((filenameStatus == STATUS_SUCCESS) && (expectedLength == 0)) {
+	if ((filenameStatus == STATUS_SUCCESS) && (expectedLength == (sizeof(WCHAR) * 10))) {
 		ExFreePool(processString);
 		ExFreePool(fullString);
 		ExFreePool(nameBuffer);
 		ExFreePool(pidBuffer);
+		ExFreePool(compareBuffer);
 		return oldZwClose(Handle);
 	}
 	else {
@@ -5401,7 +5421,7 @@ NTSTATUS newZwClose(HANDLE Handle){
 		//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 		ntStatus = oldZwClose(Handle);
 		
-		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 		RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwClose.txt");
 		RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5414,6 +5434,7 @@ NTSTATUS newZwClose(HANDLE Handle){
 	ExFreePool(timeBuffer);
 	ExFreePool(nameBuffer);
 	ExFreePool(pidBuffer);
+	ExFreePool(compareBuffer);
 
 	return ntStatus;
 }	
@@ -5441,14 +5462,14 @@ NTSTATUS newZwSetEvent(HANDLE EventHandle, PULONG PreviousState){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwSetEvent \r\n");
@@ -5487,7 +5508,7 @@ NTSTATUS newZwSetEvent(HANDLE EventHandle, PULONG PreviousState){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetEvent(EventHandle,PreviousState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5539,7 +5560,7 @@ NTSTATUS newZwOpenThreadToken(HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, BO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5548,7 +5569,7 @@ NTSTATUS newZwOpenThreadToken(HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, BO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwOpenThreadToken \r\n");
@@ -5587,7 +5608,7 @@ NTSTATUS newZwOpenThreadToken(HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, BO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenThreadToken(ThreadHandle,DesiredAccess,OpenAsSelf,TokenHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenThreadToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5639,7 +5660,7 @@ NTSTATUS newZwOpenThreadTokenEx(HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5648,7 +5669,7 @@ NTSTATUS newZwOpenThreadTokenEx(HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwOpenThreadTokenEx \r\n");
@@ -5687,7 +5708,7 @@ NTSTATUS newZwOpenThreadTokenEx(HANDLE ThreadHandle, ACCESS_MASK DesiredAccess, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenThreadTokenEx(ThreadHandle,DesiredAccess,OpenAsSelf,HandleAttributes,TokenHandle);;
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenThreadTokenEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5739,7 +5760,7 @@ NTSTATUS newZwOpenKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTR
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5748,7 +5769,7 @@ NTSTATUS newZwOpenKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTR
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwOpenKey \r\n");
@@ -5787,7 +5808,7 @@ NTSTATUS newZwOpenKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTR
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenKey(KeyHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5819,7 +5840,7 @@ NTSTATUS newZwOpenKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_ATTR
 }		
 NTSTATUS newZwAllocateVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddresss, ULONG ZeroBits, PULONG AllocationSize, ULONG AllocationType, ULONG Protect){
 	NTSTATUS ntStatus;
-	WCHAR processString[150];
+	WCHAR processString[250];
 	WCHAR fullString[950];
 	WCHAR timeBuffer[150];
 	WCHAR pidBuffer[70];
@@ -5839,7 +5860,7 @@ NTSTATUS newZwAllocateVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddresss, U
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5876,7 +5897,7 @@ NTSTATUS newZwAllocateVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddresss, U
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	//ntStatus = oldZwAllocateVirtualMemory(ProcessHandle,*BaseAddresss,ZeroBits,AllocationSize,AllocationType,Protect);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAllocateVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -5927,7 +5948,7 @@ NTSTATUS newZwProtectVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddresss, PU
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -5936,7 +5957,7 @@ NTSTATUS newZwProtectVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddresss, PU
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -5975,7 +5996,7 @@ NTSTATUS newZwProtectVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddresss, PU
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwProtectVirtualMemory(ProcessHandle,BaseAddresss,ProtectSize,NewProtect,OldProtect);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwProtectVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6028,7 +6049,7 @@ NTSTATUS newZwQueryInformationToken(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS 
 	ANSI_STRING ansiTime;
 	counter+=1;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6037,7 +6058,7 @@ NTSTATUS newZwQueryInformationToken(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwQueryInformationToken \r\n");
@@ -6076,7 +6097,7 @@ NTSTATUS newZwQueryInformationToken(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryInformationToken(TokenHandle,TokenInformationClass,TokenInformation,TokenInformationLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6128,7 +6149,7 @@ NTSTATUS newZwEnumerateKey(HANDLE KeyHandle, ULONG Index, KEY_INFORMATION_CLASS 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6137,7 +6158,7 @@ NTSTATUS newZwEnumerateKey(HANDLE KeyHandle, ULONG Index, KEY_INFORMATION_CLASS 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwEnumerateKey \r\n");
@@ -6176,7 +6197,7 @@ NTSTATUS newZwEnumerateKey(HANDLE KeyHandle, ULONG Index, KEY_INFORMATION_CLASS 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwEnumerateKey(KeyHandle,Index,KeyInformationClass,KeyInformation,KeyInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwEnumerateKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6228,7 +6249,7 @@ NTSTATUS newZwFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddresss, UL
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6237,7 +6258,7 @@ NTSTATUS newZwFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddresss, UL
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwFlushInstructionCache \r\n");
@@ -6276,7 +6297,7 @@ NTSTATUS newZwFlushInstructionCache(HANDLE ProcessHandle, PVOID BaseAddresss, UL
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFlushInstructionCache(ProcessHandle,BaseAddresss,FlushSize);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFlushInstructionCache.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6328,7 +6349,7 @@ NTSTATUS newZwQuerySecurityObject(HANDLE Handle, SECURITY_INFORMATION SecurityIn
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6337,7 +6358,7 @@ NTSTATUS newZwQuerySecurityObject(HANDLE Handle, SECURITY_INFORMATION SecurityIn
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwQuerySecurityObject \r\n");
@@ -6376,7 +6397,7 @@ NTSTATUS newZwQuerySecurityObject(HANDLE Handle, SECURITY_INFORMATION SecurityIn
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySecurityObject(Handle,SecurityInformation,SecurityDescriptor,SecurityDescriptorLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySecurityObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6428,7 +6449,7 @@ NTSTATUS newZwQueryDefaultLocale(BOOLEAN ThreadOrSystem, PLCID Locale){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6437,7 +6458,7 @@ NTSTATUS newZwQueryDefaultLocale(BOOLEAN ThreadOrSystem, PLCID Locale){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwQueryDefaultLocale \r\n");
@@ -6476,7 +6497,7 @@ NTSTATUS newZwQueryDefaultLocale(BOOLEAN ThreadOrSystem, PLCID Locale){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryDefaultLocale(ThreadOrSystem,Locale);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryDefaultLocale.txt\0");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6529,7 +6550,7 @@ NTSTATUS newZwQuerySystemTime(PLARGE_INTEGER CurrentTime){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6538,7 +6559,7 @@ NTSTATUS newZwQuerySystemTime(PLARGE_INTEGER CurrentTime){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwQuerySystemTime \r\n");
@@ -6577,7 +6598,7 @@ NTSTATUS newZwQuerySystemTime(PLARGE_INTEGER CurrentTime){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySystemTime(CurrentTime);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySystemTime.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6629,7 +6650,7 @@ NTSTATUS newZwOpenSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6638,7 +6659,7 @@ NTSTATUS newZwOpenSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, POBJ
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwOpenSection \r\n");
@@ -6677,7 +6698,7 @@ NTSTATUS newZwOpenSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, POBJ
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenSection(SectionHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenSection.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6729,7 +6750,7 @@ NTSTATUS newZwSetInformationProcess(HANDLE ProcessHandle, PROCESSINFOCLASS Proce
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6738,7 +6759,7 @@ NTSTATUS newZwSetInformationProcess(HANDLE ProcessHandle, PROCESSINFOCLASS Proce
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwSetInformationProcess \r\n");
@@ -6777,7 +6798,7 @@ NTSTATUS newZwSetInformationProcess(HANDLE ProcessHandle, PROCESSINFOCLASS Proce
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationProcess(ProcessHandle,ProcessInformationClass,ProcessInformation,ProcessInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6838,7 +6859,7 @@ NTSTATUS newZwQueryInformationProcess(HANDLE ProcessHandle, PROCESSINFOCLASS Pro
 		UNICODE_STRING uTime = {0};
 		UNICODE_STRING uPid= {0};
 		
-		uProcess.MaximumLength = 150 * sizeof(WCHAR);
+		uProcess.MaximumLength = 250 * sizeof(WCHAR);
 		uFullString.MaximumLength = 950 * sizeof(WCHAR);
 		uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6847,7 +6868,7 @@ NTSTATUS newZwQueryInformationProcess(HANDLE ProcessHandle, PROCESSINFOCLASS Pro
 		uFullString.Length = 0;
 		
 		pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 		if (fullString == NULL) {
 			DbgPrint("I was null in newZwQueryInformationProcess \r\n");
@@ -6886,7 +6907,7 @@ NTSTATUS newZwQueryInformationProcess(HANDLE ProcessHandle, PROCESSINFOCLASS Pro
 		//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 		ntStatus = oldZwQueryInformationProcess(ProcessHandle,ProcessInformationClass,ProcessInformation,ProcessInformationLength,ReturnLength);
 		
-		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 		RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationProcess.txt");
 		RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -6940,7 +6961,7 @@ NTSTATUS newZwGetContextThread(HANDLE ThreadHandle, PCONTEXT Context){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -6949,7 +6970,7 @@ NTSTATUS newZwGetContextThread(HANDLE ThreadHandle, PCONTEXT Context){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwGetContextThread \r\n");
@@ -6988,7 +7009,7 @@ NTSTATUS newZwGetContextThread(HANDLE ThreadHandle, PCONTEXT Context){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwGetContextThread(ThreadHandle,Context);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwGetContextThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7040,7 +7061,7 @@ NTSTATUS newZwCreateProfile(PHANDLE ProfileHandle, HANDLE ProcessHandle, PVOID B
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7049,7 +7070,7 @@ NTSTATUS newZwCreateProfile(PHANDLE ProfileHandle, HANDLE ProcessHandle, PVOID B
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwCreateProfile \r\n");
@@ -7088,7 +7109,7 @@ NTSTATUS newZwCreateProfile(PHANDLE ProfileHandle, HANDLE ProcessHandle, PVOID B
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateProfile(ProfileHandle,ProcessHandle,Base,Size,BucketShift,Buffer,BufferLength,Source,ProcessorMask);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateProfile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7140,7 +7161,7 @@ NTSTATUS newZwStartProfile(HANDLE ProfileHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7149,7 +7170,7 @@ NTSTATUS newZwStartProfile(HANDLE ProfileHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwStartProfile \r\n");
@@ -7188,7 +7209,7 @@ NTSTATUS newZwStartProfile(HANDLE ProfileHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwStartProfile(ProfileHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwStartProfile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7241,7 +7262,7 @@ NTSTATUS newZwAccessCheck(PSECURITY_DESCRIPTOR SecurityDescriptor, HANDLE TokenH
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7250,7 +7271,7 @@ NTSTATUS newZwAccessCheck(PSECURITY_DESCRIPTOR SecurityDescriptor, HANDLE TokenH
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR)*70, 'pibf');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwAccessCheck \r\n");
@@ -7289,7 +7310,7 @@ NTSTATUS newZwAccessCheck(PSECURITY_DESCRIPTOR SecurityDescriptor, HANDLE TokenH
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheck(SecurityDescriptor,TokenHandle,DesiredAccess,GenericMapping,PrivilegeSet,PrivilegeSetLength,GrantedAccess,AccessStatus);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheck.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7341,7 +7362,7 @@ NTSTATUS newZwAccessCheckAndAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Hand
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7349,7 +7370,7 @@ NTSTATUS newZwAccessCheckAndAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Hand
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwAccessCheckAndAuditAlarm \r\n");
@@ -7388,7 +7409,7 @@ NTSTATUS newZwAccessCheckAndAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Hand
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheckAndAuditAlarm(SubsystemName,HandleId,ObjectTypeName,ObjectName,SecurityDescriptor,GenericMapping,ObjectCreation,GrantedAccess,AccessStatus,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheckAndAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7440,7 +7461,7 @@ NTSTATUS newZwSetSystemInformation(SYSTEM_INFORMATION_CLASS SystemInformationCla
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7448,7 +7469,7 @@ NTSTATUS newZwSetSystemInformation(SYSTEM_INFORMATION_CLASS SystemInformationCla
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwSetSystemInformation \r\n");
@@ -7487,7 +7508,7 @@ NTSTATUS newZwSetSystemInformation(SYSTEM_INFORMATION_CLASS SystemInformationCla
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetSystemInformation(SystemInformationClass,SystemInformation);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetSystemInformation.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7540,7 +7561,7 @@ NTSTATUS newZwGetPlugPlayEvent(ULONG Reserved1, ULONG Reserved2, PVOID Buffer, U
 	ANSI_STRING ansiTime;
 	counter+=1;
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7549,7 +7570,7 @@ NTSTATUS newZwGetPlugPlayEvent(ULONG Reserved1, ULONG Reserved2, PVOID Buffer, U
 	uPid.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'pibf');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwGetPlugPlayEvent \r\n");
@@ -7588,7 +7609,7 @@ NTSTATUS newZwGetPlugPlayEvent(ULONG Reserved1, ULONG Reserved2, PVOID Buffer, U
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwGetPlugPlayEvent(Reserved1,Reserved2,Buffer,BufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwGetPlugPlayEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7641,7 +7662,7 @@ NTSTATUS newZwPlugPlayControl(ULONG ControlCode, PVOID Buffer, ULONG BufferLengt
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7650,7 +7671,7 @@ NTSTATUS newZwPlugPlayControl(ULONG ControlCode, PVOID Buffer, ULONG BufferLengt
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwPlugPlayControl \r\n");
@@ -7689,7 +7710,7 @@ NTSTATUS newZwPlugPlayControl(ULONG ControlCode, PVOID Buffer, ULONG BufferLengt
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwPlugPlayControl(ControlCode,Buffer,BufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwPlugPlayControl.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7741,7 +7762,7 @@ NTSTATUS newZwLockVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7750,7 +7771,7 @@ NTSTATUS newZwLockVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -7789,7 +7810,7 @@ NTSTATUS newZwLockVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwLockVirtualMemory(ProcessHandle,BaseAddress,LockSize,LockType);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwLockVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7841,7 +7862,7 @@ NTSTATUS newZwUnlockVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7850,7 +7871,7 @@ NTSTATUS newZwUnlockVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -7889,7 +7910,7 @@ NTSTATUS newZwUnlockVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwUnlockVirtualMemory(ProcessHandle,BaseAddress,LockSize,LockType);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwUnlockVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -7941,7 +7962,7 @@ NTSTATUS newZwFlushVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULON
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -7950,7 +7971,7 @@ NTSTATUS newZwFlushVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULON
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -7989,7 +8010,7 @@ NTSTATUS newZwFlushVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULON
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFlushVirtualMemory(ProcessHandle,BaseAddress,FlushSize,IoStatusBlock);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFlushVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8041,7 +8062,7 @@ NTSTATUS newZwAllocateUserPhysicalPages(HANDLE ProcessHandle, PULONG NumberOfPag
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8050,7 +8071,7 @@ NTSTATUS newZwAllocateUserPhysicalPages(HANDLE ProcessHandle, PULONG NumberOfPag
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -8089,7 +8110,7 @@ NTSTATUS newZwAllocateUserPhysicalPages(HANDLE ProcessHandle, PULONG NumberOfPag
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAllocateUserPhysicalPages(ProcessHandle,NumberOfPages,PageFrameNumbers);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAllocateUserPhysicalPages.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8141,7 +8162,7 @@ NTSTATUS newZwFreeUserPhysicalPages(HANDLE ProcessHandle, PULONG NumberOfPages, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8150,7 +8171,7 @@ NTSTATUS newZwFreeUserPhysicalPages(HANDLE ProcessHandle, PULONG NumberOfPages, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -8189,7 +8210,7 @@ NTSTATUS newZwFreeUserPhysicalPages(HANDLE ProcessHandle, PULONG NumberOfPages, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFreeUserPhysicalPages(ProcessHandle,NumberOfPages,PageFrameNumbers);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFreeUserPhysicalPages.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8241,7 +8262,7 @@ NTSTATUS newZwMapUserPhysicalPages(PVOID BaseAddress, PULONG NumberOfPages, PULO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8250,7 +8271,7 @@ NTSTATUS newZwMapUserPhysicalPages(PVOID BaseAddress, PULONG NumberOfPages, PULO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -8289,7 +8310,7 @@ NTSTATUS newZwMapUserPhysicalPages(PVOID BaseAddress, PULONG NumberOfPages, PULO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwMapUserPhysicalPages(BaseAddress,NumberOfPages,PageFrameNumbers);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapUserPhysicalPages.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8341,7 +8362,7 @@ NTSTATUS newZwMapUserPhysicalPagesScatter(PVOID *BaseAddress, PULONG NumberOfPag
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8350,7 +8371,7 @@ NTSTATUS newZwMapUserPhysicalPagesScatter(PVOID *BaseAddress, PULONG NumberOfPag
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -8389,7 +8410,7 @@ NTSTATUS newZwMapUserPhysicalPagesScatter(PVOID *BaseAddress, PULONG NumberOfPag
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwMapUserPhysicalPagesScatter(BaseAddress,NumberOfPages,PageFrameNumbers);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapUserPhysicalPagesScatter.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8441,7 +8462,7 @@ NTSTATUS newZwGetWriteWatch(HANDLE ProcessHandle, ULONG Flags, PVOID BaseAddress
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8450,7 +8471,7 @@ NTSTATUS newZwGetWriteWatch(HANDLE ProcessHandle, ULONG Flags, PVOID BaseAddress
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -8489,7 +8510,7 @@ NTSTATUS newZwGetWriteWatch(HANDLE ProcessHandle, ULONG Flags, PVOID BaseAddress
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwGetWriteWatch(ProcessHandle,Flags,BaseAddress,RegionSize,Buffer,BufferEntries,Granularity);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwGetWriteWatch.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8541,7 +8562,7 @@ NTSTATUS newZwResetWriteWatch(HANDLE ProcessHandle, PVOID BaseAddress, ULONG Reg
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8550,7 +8571,7 @@ NTSTATUS newZwResetWriteWatch(HANDLE ProcessHandle, PVOID BaseAddress, ULONG Reg
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -8589,7 +8610,7 @@ NTSTATUS newZwResetWriteWatch(HANDLE ProcessHandle, PVOID BaseAddress, ULONG Reg
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwResetWriteWatch(ProcessHandle,BaseAddress,RegionSize);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwResetWriteWatch.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8628,7 +8649,7 @@ NTSTATUS newZwFreeVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 	PIO_STACK_LOCATION stackLoc;
 	PIRP Irp;
 	ANSI_STRING ansiTime;
-	WCHAR processString[150];	
+	WCHAR processString[250];	
 	WCHAR fullString[950];
 	WCHAR timeBuffer[150];
 	WCHAR pidBuffer[70];
@@ -8640,7 +8661,7 @@ NTSTATUS newZwFreeVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 	UNICODE_STRING uTime = {0};
 	UNICODE_STRING uPid= {0};
 	
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8681,7 +8702,7 @@ NTSTATUS newZwFreeVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFreeVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8710,7 +8731,7 @@ NTSTATUS newZwFreeVirtualMemory(HANDLE ProcessHandle, PVOID *BaseAddress, PULONG
 }		
 NTSTATUS newZwQueryVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, MEMORY_INFORMATION_CLASS MemoryInformationClass, PVOID MemoryInformation, ULONG MemoryInformationLength, PULONG ReturnLength){
 	NTSTATUS ntStatus;
-	WCHAR processString[150];
+	WCHAR processString[250];
 	WCHAR fullString[950];
 	WCHAR timeBuffer[150];
 	WCHAR pidBuffer[70];
@@ -8730,7 +8751,7 @@ NTSTATUS newZwQueryVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, MEMORY
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8769,7 +8790,7 @@ NTSTATUS newZwQueryVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, MEMORY
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8797,7 +8818,7 @@ NTSTATUS newZwQueryVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, MEMORY
 }		
 NTSTATUS newZwReadVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer, ULONG BufferLength, PULONG ReturnLength){
 	NTSTATUS ntStatus;
-	WCHAR processString[150];
+	WCHAR processString[250];
 	WCHAR fullString[950];
 	WCHAR timeBuffer[150];
 	WCHAR pidBuffer[70];
@@ -8817,7 +8838,7 @@ NTSTATUS newZwReadVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID B
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8856,7 +8877,7 @@ NTSTATUS newZwReadVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID B
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReadVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8884,7 +8905,7 @@ NTSTATUS newZwReadVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID B
 }		
 NTSTATUS newZwWriteVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID Buffer, ULONG BufferLength, PULONG ReturnLength){
 	NTSTATUS ntStatus;
-	WCHAR processString[150];
+	WCHAR processString[250];
 	WCHAR fullString[950];
 	WCHAR timeBuffer[150];
 	WCHAR pidBuffer[70];
@@ -8904,7 +8925,7 @@ NTSTATUS newZwWriteVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -8943,7 +8964,7 @@ NTSTATUS newZwWriteVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress, PVOID 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWriteVirtualMemory.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -8991,7 +9012,7 @@ NTSTATUS newZwCreateFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9000,7 +9021,7 @@ NTSTATUS newZwCreateFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9039,7 +9060,7 @@ NTSTATUS newZwCreateFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateFile(FileHandle,DesiredAccess,ObjectAttributes,IoStatusBlock,AllocationSize,FileAttributes,ShareAccess,CreateDisposition,CreateOptions,EaBuffer,EaLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9105,7 +9126,7 @@ NTSTATUS newZwOpenFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 	}
 	else {	
 	
-		uProcess.MaximumLength = 150 * sizeof(WCHAR);
+		uProcess.MaximumLength = 250 * sizeof(WCHAR);
 		uFullString.MaximumLength = 950 * sizeof(WCHAR);
 		uPid.MaximumLength = 70 * sizeof(WCHAR);
 		
@@ -9114,7 +9135,7 @@ NTSTATUS newZwOpenFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 		uFullString.Length = 0;
 		
 		pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 		if (fullString == NULL) {
 			DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9154,7 +9175,7 @@ NTSTATUS newZwOpenFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 		//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 		ntStatus = oldZwOpenFile(FileHandle,DesiredAccess,ObjectAttributes,IoStatusBlock,ShareAccess,OpenOptions);
 		
-		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 		RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenFile.txt");
 		RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9207,7 +9228,7 @@ NTSTATUS newZwDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9216,7 +9237,7 @@ NTSTATUS newZwDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9255,7 +9276,7 @@ NTSTATUS newZwDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDeleteFile(ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDeleteFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9307,7 +9328,7 @@ NTSTATUS newZwFlushBuffersFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9316,7 +9337,7 @@ NTSTATUS newZwFlushBuffersFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9355,7 +9376,7 @@ NTSTATUS newZwFlushBuffersFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFlushBuffersFile(FileHandle,IoStatusBlock);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFlushBuffersFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9407,7 +9428,7 @@ NTSTATUS newZwCancelIoFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9416,7 +9437,7 @@ NTSTATUS newZwCancelIoFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9455,7 +9476,7 @@ NTSTATUS newZwCancelIoFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCancelIoFile(FileHandle,IoStatusBlock);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCancelIoFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9492,7 +9513,8 @@ NTSTATUS newZwWriteFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRout
 	PWCHAR fullString;
 	PWCHAR timeBuffer;
 	PWCHAR pidBuffer;
-	PWCHAR nameBuffer;
+	
+	PWCHAR compareBuffer;
 	
 	ULONG pid;
 	size_t expectedLength;
@@ -9500,6 +9522,7 @@ NTSTATUS newZwWriteFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRout
 	LARGE_INTEGER mSec, currTimeStamp;
 	ULONG timeIncrement;
 	char aTime[150];
+	WCHAR nameBuffer[350];
 	
 	PIO_STACK_LOCATION stackLoc;
 	PIRP Irp;
@@ -9509,44 +9532,58 @@ NTSTATUS newZwWriteFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRout
 	UNICODE_STRING uTime = {0};
 	UNICODE_STRING uPid= {0};
 	UNICODE_STRING uName = {0};
+	UNICODE_STRING compareString = {0};
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
-	uName.MaximumLength = 150 * sizeof(WCHAR);
+	uName.MaximumLength = 350 * sizeof(WCHAR);
+	compareString.MaximumLength = 100 * sizeof(WCHAR);
 	
 	uPid.Length = 0;	
 	uProcess.Length = 0;
 	uFullString.Length = 0;
 	uName.Length = 0;
+	compareString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
-	nameBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'kwjl');
-
+	//nameBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 350, 'kwjl');
+	compareBuffer = (PWCHAR) ExAllocatePool(PagedPool, sizeof(WCHAR) * 100);
+	
 	uProcess.Buffer = processString;
 	uFullString.Buffer = fullString;
 	uPid.Buffer = pidBuffer;
-	uName.Buffer = nameBuffer;
+	RtlInitEmptyUnicodeString(&uName, nameBuffer, sizeof(WCHAR) * 350);
+	compareString.Buffer = compareBuffer;
 		
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
 		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 550, 'icfs');
-	}		
-	filenameStatus = getFilenameByHandle(FileHandle, &uName);
+	}
+	if (nameBuffer == NULL){
+		DbgPrint("I was null");
+	}
+	else {
+		filenameStatus = getFilenameByHandle(FileHandle, &uName);
+	}
+	RtlAppendUnicodeToString(&compareString, L"\\WINDOWS\\d\\"); 
 	expectedLength = sizeof(WCHAR) * 27;
 	//DbgPrint("ObjectAttributes: %wZ \r\n", ObjectAttributes->ObjectName);
 	if (filenameStatus == STATUS_SUCCESS) {
-		expectedLength = memcmp(uName.Buffer, L"\\WINDOWS\\d\\", sizeof(WCHAR) * 10); 
+		expectedLength = RtlCompareMemory(uName.Buffer, compareString.Buffer, sizeof(WCHAR) * 10); 
 	}
-	if ((filenameStatus == STATUS_SUCCESS) && (expectedLength == 0)) {
+	if ((filenameStatus == STATUS_SUCCESS) && (expectedLength == (sizeof(WCHAR) * 10))) {
 		ExFreePool(processString);
-		ExFreePool(fullString);
-		ExFreePool(nameBuffer);
+		if (fullString != NULL) {
+			ExFreePool(fullString);
+		}
+
 		ExFreePool(pidBuffer);
+		ExFreePool(compareBuffer);
 		return oldZwWriteFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,Buffer,Length,ByteOffset,Key);
 	}
 	else {
@@ -9571,6 +9608,7 @@ NTSTATUS newZwWriteFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRout
 		RtlAppendUnicodeStringToString(&uFullString, &uPid);
 		RtlAppendUnicodeToString(&uFullString, L",");	
 		
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		getPIDByThreadHandle(NtCurrentProcess(), &uProcess);
 		RtlAppendUnicodeToString(&uFullString, L"MethodName=ZwWriteFile,"); 
 		RtlAppendUnicodeToString(&uFullString, L"ProcessName=");
@@ -9579,7 +9617,7 @@ NTSTATUS newZwWriteFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRout
 		//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 		ntStatus = oldZwWriteFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,Buffer,Length,ByteOffset,Key);
 		
-		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 		RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWriteFile.txt");
 		RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9606,8 +9644,9 @@ NTSTATUS newZwWriteFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRout
 		ExFreePool(processString);
 		ExFreePool(fullString);
 		ExFreePool(timeBuffer);
-		ExFreePool(nameBuffer);
+		//ExFreePool(nameBuffer);
 		ExFreePool(pidBuffer);
+		ExFreePool(compareBuffer);
 		return ntStatus;
 	}
 	
@@ -9634,7 +9673,7 @@ NTSTATUS newZwReadFileScatter(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE A
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9643,7 +9682,7 @@ NTSTATUS newZwReadFileScatter(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE A
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9682,7 +9721,7 @@ NTSTATUS newZwReadFileScatter(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE A
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReadFileScatter(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,Buffer,Length,ByteOffset,Key);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReadFileScatter.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9734,7 +9773,7 @@ NTSTATUS newZwWriteFileGather(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE A
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9743,7 +9782,7 @@ NTSTATUS newZwWriteFileGather(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE A
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9782,7 +9821,7 @@ NTSTATUS newZwWriteFileGather(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE A
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwWriteFileGather(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,Buffer,Length,ByteOffset,Key);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWriteFileGather.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9834,7 +9873,7 @@ NTSTATUS newZwLockFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRouti
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9843,7 +9882,7 @@ NTSTATUS newZwLockFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRouti
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9882,7 +9921,7 @@ NTSTATUS newZwLockFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE ApcRouti
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwLockFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,LockOffset,LockLength,Key,FailImmediately,ExclusiveLock);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwLockFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -9934,7 +9973,7 @@ NTSTATUS newZwUnlockFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PULA
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -9943,7 +9982,7 @@ NTSTATUS newZwUnlockFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PULA
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -9982,7 +10021,7 @@ NTSTATUS newZwUnlockFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PULA
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwUnlockFile(FileHandle,IoStatusBlock,LockOffset,LockLength,Key);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwUnlockFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10034,7 +10073,7 @@ NTSTATUS newZwFsControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE Apc
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10043,7 +10082,7 @@ NTSTATUS newZwFsControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE Apc
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10082,7 +10121,7 @@ NTSTATUS newZwFsControlFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTINE Apc
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFsControlFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,FsControlCode,InputBuffer,InputBufferLength,OutputBuffer,OutputBufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFsControlFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10134,7 +10173,7 @@ NTSTATUS newZwNotifyChangeDirectoryFile(HANDLE FileHandle, HANDLE Event, PIO_APC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10143,7 +10182,7 @@ NTSTATUS newZwNotifyChangeDirectoryFile(HANDLE FileHandle, HANDLE Event, PIO_APC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10182,7 +10221,7 @@ NTSTATUS newZwNotifyChangeDirectoryFile(HANDLE FileHandle, HANDLE Event, PIO_APC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwNotifyChangeDirectoryFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,Buffer,BufferLength,NotifyFilter,WatchSubtree);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwNotifyChangeDirectoryFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10234,7 +10273,7 @@ NTSTATUS newZwQueryEaFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PFI
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10243,7 +10282,7 @@ NTSTATUS newZwQueryEaFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PFI
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10282,7 +10321,7 @@ NTSTATUS newZwQueryEaFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PFI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryEaFile(FileHandle,IoStatusBlock,Buffer,BufferLength,ReturnSingleEntry,EaList,EaListLength,EaIndex,RestartScan);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryEaFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10334,7 +10373,7 @@ NTSTATUS newZwSetEaFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PFILE
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10343,7 +10382,7 @@ NTSTATUS newZwSetEaFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PFILE
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10382,7 +10421,7 @@ NTSTATUS newZwSetEaFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlock, PFILE
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetEaFile(FileHandle,IoStatusBlock,Buffer,BufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetEaFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10434,7 +10473,7 @@ NTSTATUS newZwCreateNamedPipeFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10443,7 +10482,7 @@ NTSTATUS newZwCreateNamedPipeFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10482,7 +10521,7 @@ NTSTATUS newZwCreateNamedPipeFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateNamedPipeFile(FileHandle,DesiredAccess,ObjectAttributes,IoStatusBlock,ShareAccess,CreateDisposition,CreateOptions,TypeMessage,ReadmodeMessage,Nonblocking,MaxInstances,InBufferSize,OutBufferSize,DefaultTimeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateNamedPipeFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10534,7 +10573,7 @@ NTSTATUS newZwCreateMailslotFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10543,7 +10582,7 @@ NTSTATUS newZwCreateMailslotFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10582,7 +10621,7 @@ NTSTATUS newZwCreateMailslotFile(PHANDLE FileHandle, ACCESS_MASK DesiredAccess, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateMailslotFile(FileHandle,DesiredAccess,ObjectAttributes,IoStatusBlock,CreateOptions,InBufferSize,MaxMessageSize,ReadTimeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateMailslotFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10634,7 +10673,7 @@ NTSTATUS newZwQueryVolumeInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10643,7 +10682,7 @@ NTSTATUS newZwQueryVolumeInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10682,7 +10721,7 @@ NTSTATUS newZwQueryVolumeInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryVolumeInformationFile(FileHandle,IoStatusBlock,VolumeInformation,VolumeInformationLength,VolumeInformationClass);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryVolumeInformationFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10734,7 +10773,7 @@ NTSTATUS newZwSetVolumeInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoSta
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10743,7 +10782,7 @@ NTSTATUS newZwSetVolumeInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoSta
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10782,7 +10821,7 @@ NTSTATUS newZwSetVolumeInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoSta
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetVolumeInformationFile(FileHandle,IoStatusBlock,Buffer,BufferLength,VolumeInformationClass);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetVolumeInformationFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10834,7 +10873,7 @@ NTSTATUS newZwQueryQuotaInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoSt
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10843,7 +10882,7 @@ NTSTATUS newZwQueryQuotaInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoSt
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10882,7 +10921,7 @@ NTSTATUS newZwQueryQuotaInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoSt
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryQuotaInformationFile(FileHandle,IoStatusBlock,Buffer,BufferLength,ReturnSingleEntry,QuotaList,QuotaListLength,ResumeSid,RestartScan);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryQuotaInformationFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -10934,7 +10973,7 @@ NTSTATUS newZwSetQuotaInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStat
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -10943,7 +10982,7 @@ NTSTATUS newZwSetQuotaInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStat
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -10982,7 +11021,7 @@ NTSTATUS newZwSetQuotaInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStat
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetQuotaInformationFile(FileHandle,IoStatusBlock,Buffer,BufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetQuotaInformationFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11034,7 +11073,7 @@ NTSTATUS newZwQueryAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE_BAS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11043,7 +11082,7 @@ NTSTATUS newZwQueryAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE_BAS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11082,7 +11121,7 @@ NTSTATUS newZwQueryAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE_BAS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryAttributesFile(ObjectAttributes,FileInformation);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryAttributesFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11134,7 +11173,7 @@ NTSTATUS newZwQueryFullAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11143,7 +11182,7 @@ NTSTATUS newZwQueryFullAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11182,7 +11221,7 @@ NTSTATUS newZwQueryFullAttributesFile(POBJECT_ATTRIBUTES ObjectAttributes, PFILE
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryFullAttributesFile(ObjectAttributes,FileInformation);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryFullAttributesFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11239,7 +11278,7 @@ NTSTATUS newZwQueryInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusB
 		return oldZwQueryInformationFile(FileHandle,IoStatusBlock,FileInformation,FileInformationLength,FileInformationClass);
 	}
 	else {
-		uProcess.MaximumLength = 150 * sizeof(WCHAR);
+		uProcess.MaximumLength = 250 * sizeof(WCHAR);
 		uFullString.MaximumLength = 950 * sizeof(WCHAR);
 		uPid.MaximumLength = 70 * sizeof(WCHAR);
 		
@@ -11248,7 +11287,7 @@ NTSTATUS newZwQueryInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusB
 		uFullString.Length = 0;
 		
 		pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 		if (fullString == NULL) {
 			DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11287,7 +11326,7 @@ NTSTATUS newZwQueryInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusB
 		//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 		ntStatus = oldZwQueryInformationFile(FileHandle,IoStatusBlock,FileInformation,FileInformationLength,FileInformationClass);
 		
-		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 		//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 		RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationFile.txt");
 		RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11340,7 +11379,7 @@ NTSTATUS newZwSetInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlo
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11349,7 +11388,7 @@ NTSTATUS newZwSetInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlo
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11388,7 +11427,7 @@ NTSTATUS newZwSetInformationFile(HANDLE FileHandle, PIO_STATUS_BLOCK IoStatusBlo
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationFile(FileHandle,IoStatusBlock,FileInformation,FileInformationLength,FileInformationClass);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11440,7 +11479,7 @@ NTSTATUS newZwQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTIN
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11449,7 +11488,7 @@ NTSTATUS newZwQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTIN
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11488,7 +11527,7 @@ NTSTATUS newZwQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, PIO_APC_ROUTIN
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryDirectoryFile(FileHandle,Event,ApcRoutine,ApcContext,IoStatusBlock,FileInformation,FileInformationLength,FileInformationClass,ReturnSingleEntry,FileName,RestartScan);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryDirectoryFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11540,7 +11579,7 @@ NTSTATUS newZwCreateKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11549,7 +11588,7 @@ NTSTATUS newZwCreateKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11588,7 +11627,7 @@ NTSTATUS newZwCreateKey(PHANDLE KeyHandle, ACCESS_MASK DesiredAccess, POBJECT_AT
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateKey(KeyHandle,DesiredAccess,ObjectAttributes,TitleIndex,Class,CreateOptions,Disposition);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11640,7 +11679,7 @@ NTSTATUS newZwDeleteKey(HANDLE KeyHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11649,7 +11688,7 @@ NTSTATUS newZwDeleteKey(HANDLE KeyHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11688,7 +11727,7 @@ NTSTATUS newZwDeleteKey(HANDLE KeyHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDeleteKey(KeyHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDeleteKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11740,7 +11779,7 @@ NTSTATUS newZwFlushKey(HANDLE KeyHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11749,7 +11788,7 @@ NTSTATUS newZwFlushKey(HANDLE KeyHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11788,7 +11827,7 @@ NTSTATUS newZwFlushKey(HANDLE KeyHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFlushKey(KeyHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFlushKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11840,7 +11879,7 @@ NTSTATUS newZwSaveKey(HANDLE KeyHandle, HANDLE FileHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11849,7 +11888,7 @@ NTSTATUS newZwSaveKey(HANDLE KeyHandle, HANDLE FileHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11888,7 +11927,7 @@ NTSTATUS newZwSaveKey(HANDLE KeyHandle, HANDLE FileHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSaveKey(KeyHandle,FileHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSaveKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -11940,7 +11979,7 @@ NTSTATUS newZwSaveKeyEx(HANDLE KeyHandle, HANDLE FileHandle, ULONG Flags){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -11949,7 +11988,7 @@ NTSTATUS newZwSaveKeyEx(HANDLE KeyHandle, HANDLE FileHandle, ULONG Flags){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -11988,7 +12027,7 @@ NTSTATUS newZwSaveKeyEx(HANDLE KeyHandle, HANDLE FileHandle, ULONG Flags){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSaveKeyEx(KeyHandle,FileHandle,Flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSaveKeyEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12040,7 +12079,7 @@ NTSTATUS newZwSaveMergedKeys(HANDLE KeyHandle1, HANDLE KeyHandle2, HANDLE FileHa
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12049,7 +12088,7 @@ NTSTATUS newZwSaveMergedKeys(HANDLE KeyHandle1, HANDLE KeyHandle2, HANDLE FileHa
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12088,7 +12127,7 @@ NTSTATUS newZwSaveMergedKeys(HANDLE KeyHandle1, HANDLE KeyHandle2, HANDLE FileHa
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSaveMergedKeys(KeyHandle1,KeyHandle2,FileHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSaveMergedKeys.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12140,7 +12179,7 @@ NTSTATUS newZwRestoreKey(HANDLE KeyHandle, HANDLE FileHandle, ULONG Flags){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12149,7 +12188,7 @@ NTSTATUS newZwRestoreKey(HANDLE KeyHandle, HANDLE FileHandle, ULONG Flags){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12188,7 +12227,7 @@ NTSTATUS newZwRestoreKey(HANDLE KeyHandle, HANDLE FileHandle, ULONG Flags){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRestoreKey(KeyHandle,FileHandle,Flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRestoreKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12240,7 +12279,7 @@ NTSTATUS newZwLoadKey(POBJECT_ATTRIBUTES KeyObjectAttributes, POBJECT_ATTRIBUTES
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12249,7 +12288,7 @@ NTSTATUS newZwLoadKey(POBJECT_ATTRIBUTES KeyObjectAttributes, POBJECT_ATTRIBUTES
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12288,7 +12327,7 @@ NTSTATUS newZwLoadKey(POBJECT_ATTRIBUTES KeyObjectAttributes, POBJECT_ATTRIBUTES
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwLoadKey(KeyObjectAttributes,FileObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwLoadKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12340,7 +12379,7 @@ NTSTATUS newZwLoadKey2(POBJECT_ATTRIBUTES KeyObjectAttributes, POBJECT_ATTRIBUTE
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12349,7 +12388,7 @@ NTSTATUS newZwLoadKey2(POBJECT_ATTRIBUTES KeyObjectAttributes, POBJECT_ATTRIBUTE
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12388,7 +12427,7 @@ NTSTATUS newZwLoadKey2(POBJECT_ATTRIBUTES KeyObjectAttributes, POBJECT_ATTRIBUTE
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwLoadKey2(KeyObjectAttributes,FileObjectAttributes,Flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwLoadKey2.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12440,7 +12479,7 @@ NTSTATUS newZwUnloadKey(POBJECT_ATTRIBUTES KeyObjectAttributes){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12449,7 +12488,7 @@ NTSTATUS newZwUnloadKey(POBJECT_ATTRIBUTES KeyObjectAttributes){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12488,7 +12527,7 @@ NTSTATUS newZwUnloadKey(POBJECT_ATTRIBUTES KeyObjectAttributes){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwUnloadKey(KeyObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwUnloadKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12540,7 +12579,7 @@ NTSTATUS newZwUnloadKeyEx(POBJECT_ATTRIBUTES TargetKey, HANDLE Event){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12549,7 +12588,7 @@ NTSTATUS newZwUnloadKeyEx(POBJECT_ATTRIBUTES TargetKey, HANDLE Event){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12588,7 +12627,7 @@ NTSTATUS newZwUnloadKeyEx(POBJECT_ATTRIBUTES TargetKey, HANDLE Event){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwUnloadKeyEx(TargetKey,Event);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwUnloadKeyEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12640,7 +12679,7 @@ NTSTATUS newZwQueryOpenSubKeys(POBJECT_ATTRIBUTES KeyObjectAttributes, PULONG Nu
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12649,7 +12688,7 @@ NTSTATUS newZwQueryOpenSubKeys(POBJECT_ATTRIBUTES KeyObjectAttributes, PULONG Nu
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12688,7 +12727,7 @@ NTSTATUS newZwQueryOpenSubKeys(POBJECT_ATTRIBUTES KeyObjectAttributes, PULONG Nu
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryOpenSubKeys(KeyObjectAttributes,NumberOfKeys);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryOpenSubKeys.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12740,7 +12779,7 @@ NTSTATUS newZwReplaceKey(POBJECT_ATTRIBUTES NewFileObjectAttributes, HANDLE KeyH
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12749,7 +12788,7 @@ NTSTATUS newZwReplaceKey(POBJECT_ATTRIBUTES NewFileObjectAttributes, HANDLE KeyH
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12788,7 +12827,7 @@ NTSTATUS newZwReplaceKey(POBJECT_ATTRIBUTES NewFileObjectAttributes, HANDLE KeyH
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReplaceKey(NewFileObjectAttributes,KeyHandle,OldFileObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReplaceKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12840,7 +12879,7 @@ NTSTATUS newZwSetInformationKey(HANDLE KeyHandle, KEY_SET_INFORMATION_CLASS KeyI
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12849,7 +12888,7 @@ NTSTATUS newZwSetInformationKey(HANDLE KeyHandle, KEY_SET_INFORMATION_CLASS KeyI
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12888,7 +12927,7 @@ NTSTATUS newZwSetInformationKey(HANDLE KeyHandle, KEY_SET_INFORMATION_CLASS KeyI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationKey(KeyHandle,KeyInformationClass,KeyInformation,KeyInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -12940,7 +12979,7 @@ NTSTATUS newZwQueryKey(HANDLE KeyHandle, KEY_INFORMATION_CLASS KeyInformationCla
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -12949,7 +12988,7 @@ NTSTATUS newZwQueryKey(HANDLE KeyHandle, KEY_INFORMATION_CLASS KeyInformationCla
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -12988,7 +13027,7 @@ NTSTATUS newZwQueryKey(HANDLE KeyHandle, KEY_INFORMATION_CLASS KeyInformationCla
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryKey(KeyHandle,KeyInformationClass,KeyInformation,KeyInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13040,7 +13079,7 @@ NTSTATUS newZwNotifyChangeKey(HANDLE KeyHandle, HANDLE EventHandle, PIO_APC_ROUT
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13049,7 +13088,7 @@ NTSTATUS newZwNotifyChangeKey(HANDLE KeyHandle, HANDLE EventHandle, PIO_APC_ROUT
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13088,7 +13127,7 @@ NTSTATUS newZwNotifyChangeKey(HANDLE KeyHandle, HANDLE EventHandle, PIO_APC_ROUT
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwNotifyChangeKey(KeyHandle,EventHandle,ApcRoutine,ApcContext,IoStatusBlock,NotifyFilter,WatchSubtree,Buffer,BufferLength,Asynchronous);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwNotifyChangeKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13140,7 +13179,7 @@ NTSTATUS newZwNotifyChangeMultipleKeys(HANDLE KeyHandle, ULONG Flags, POBJECT_AT
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13149,7 +13188,7 @@ NTSTATUS newZwNotifyChangeMultipleKeys(HANDLE KeyHandle, ULONG Flags, POBJECT_AT
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13188,7 +13227,7 @@ NTSTATUS newZwNotifyChangeMultipleKeys(HANDLE KeyHandle, ULONG Flags, POBJECT_AT
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwNotifyChangeMultipleKeys(KeyHandle,Flags,KeyObjectAttributes,EventHandle,ApcRoutine,ApcContext,IoStatusBlock,NotifyFilter,WatchSubtree,Buffer,BufferLength,Asynchronous);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwNotifyChangeMultipleKeys.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13240,7 +13279,7 @@ NTSTATUS newZwDeleteValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13249,7 +13288,7 @@ NTSTATUS newZwDeleteValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13288,7 +13327,7 @@ NTSTATUS newZwDeleteValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDeleteValueKey(KeyHandle,ValueName);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDeleteValueKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13340,7 +13379,7 @@ NTSTATUS newZwSetValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, ULONG Tit
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13349,7 +13388,7 @@ NTSTATUS newZwSetValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, ULONG Tit
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13388,7 +13427,7 @@ NTSTATUS newZwSetValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, ULONG Tit
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetValueKey(KeyHandle,ValueName,TitleIndex,Type,Data,DataSize);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetValueKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13440,7 +13479,7 @@ NTSTATUS newZwQueryValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, KEY_VAL
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13449,7 +13488,7 @@ NTSTATUS newZwQueryValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, KEY_VAL
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13488,7 +13527,7 @@ NTSTATUS newZwQueryValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName, KEY_VAL
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryValueKey(KeyHandle,ValueName,KeyValueInformationClass,KeyValueInformation,KeyValueInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryValueKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13540,7 +13579,7 @@ NTSTATUS newZwEnumerateValueKey(HANDLE KeyHandle, ULONG Index, KEY_VALUE_INFORMA
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13549,7 +13588,7 @@ NTSTATUS newZwEnumerateValueKey(HANDLE KeyHandle, ULONG Index, KEY_VALUE_INFORMA
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13588,7 +13627,7 @@ NTSTATUS newZwEnumerateValueKey(HANDLE KeyHandle, ULONG Index, KEY_VALUE_INFORMA
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwEnumerateValueKey(KeyHandle,Index,KeyValueInformationClass,KeyValueInformation,KeyValueInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwEnumerateValueKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13640,7 +13679,7 @@ NTSTATUS newZwQueryMultipleValueKey(HANDLE KeyHandle, PKEY_VALUE_ENTRY ValueList
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13649,7 +13688,7 @@ NTSTATUS newZwQueryMultipleValueKey(HANDLE KeyHandle, PKEY_VALUE_ENTRY ValueList
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13688,7 +13727,7 @@ NTSTATUS newZwQueryMultipleValueKey(HANDLE KeyHandle, PKEY_VALUE_ENTRY ValueList
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryMultipleValueKey(KeyHandle,ValueList,NumberOfValues,Buffer,Length,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryMultipleValueKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13740,7 +13779,7 @@ NTSTATUS newZwInitializeRegistry(BOOLEAN Setup){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13749,7 +13788,7 @@ NTSTATUS newZwInitializeRegistry(BOOLEAN Setup){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13788,7 +13827,7 @@ NTSTATUS newZwInitializeRegistry(BOOLEAN Setup){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwInitializeRegistry(Setup);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwInitializeRegistry.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13840,7 +13879,7 @@ NTSTATUS newZwCreatePort(PHANDLE PortHandle, POBJECT_ATTRIBUTES ObjectAttributes
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13849,7 +13888,7 @@ NTSTATUS newZwCreatePort(PHANDLE PortHandle, POBJECT_ATTRIBUTES ObjectAttributes
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13888,7 +13927,7 @@ NTSTATUS newZwCreatePort(PHANDLE PortHandle, POBJECT_ATTRIBUTES ObjectAttributes
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreatePort(PortHandle,ObjectAttributes,MaxDataSize,MaxMessageSize,Reserved);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreatePort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -13940,7 +13979,7 @@ NTSTATUS newZwCreateWaitablePort(PHANDLE PortHandle, POBJECT_ATTRIBUTES ObjectAt
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -13949,7 +13988,7 @@ NTSTATUS newZwCreateWaitablePort(PHANDLE PortHandle, POBJECT_ATTRIBUTES ObjectAt
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -13988,7 +14027,7 @@ NTSTATUS newZwCreateWaitablePort(PHANDLE PortHandle, POBJECT_ATTRIBUTES ObjectAt
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateWaitablePort(PortHandle,ObjectAttributes,MaxDataSize,MaxMessageSize,Reserved);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateWaitablePort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14040,7 +14079,7 @@ NTSTATUS newZwConnectPort(PHANDLE PortHandle, PUNICODE_STRING PortName, PSECURIT
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14049,7 +14088,7 @@ NTSTATUS newZwConnectPort(PHANDLE PortHandle, PUNICODE_STRING PortName, PSECURIT
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14088,7 +14127,7 @@ NTSTATUS newZwConnectPort(PHANDLE PortHandle, PUNICODE_STRING PortName, PSECURIT
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwConnectPort(PortHandle,PortName,SecurityQos,ClientView,ServerView,MaxMessageLength,ConnectInformation,ConnectInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwConnectPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14140,7 +14179,7 @@ NTSTATUS newZwSecureConnectPort(PHANDLE PortHandle, PUNICODE_STRING PortName, PS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14149,7 +14188,7 @@ NTSTATUS newZwSecureConnectPort(PHANDLE PortHandle, PUNICODE_STRING PortName, PS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14188,7 +14227,7 @@ NTSTATUS newZwSecureConnectPort(PHANDLE PortHandle, PUNICODE_STRING PortName, PS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSecureConnectPort(PortHandle,PortName,SecurityQos,ClientView,ServerSid,ServerView,MaxMessageLength,ConnectionInformation,ConnectionInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSecureConnectPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14240,7 +14279,7 @@ NTSTATUS newZwListenPort(HANDLE PortHandle, PPORT_MESSAGE Message){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14249,7 +14288,7 @@ NTSTATUS newZwListenPort(HANDLE PortHandle, PPORT_MESSAGE Message){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14288,7 +14327,7 @@ NTSTATUS newZwListenPort(HANDLE PortHandle, PPORT_MESSAGE Message){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwListenPort(PortHandle,Message);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwListenPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14340,7 +14379,7 @@ NTSTATUS newZwAcceptConnectPort(PHANDLE PortHandle, PVOID PortIdentifier, PPORT_
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14349,7 +14388,7 @@ NTSTATUS newZwAcceptConnectPort(PHANDLE PortHandle, PVOID PortIdentifier, PPORT_
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14388,7 +14427,7 @@ NTSTATUS newZwAcceptConnectPort(PHANDLE PortHandle, PVOID PortIdentifier, PPORT_
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAcceptConnectPort(PortHandle,PortIdentifier,Message,Accept,ServerView,ClientView);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAcceptConnectPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14440,7 +14479,7 @@ NTSTATUS newZwCompleteConnectPort(HANDLE PortHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14449,7 +14488,7 @@ NTSTATUS newZwCompleteConnectPort(HANDLE PortHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14488,7 +14527,7 @@ NTSTATUS newZwCompleteConnectPort(HANDLE PortHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCompleteConnectPort(PortHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCompleteConnectPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14541,7 +14580,7 @@ NTSTATUS newZwRequestPort(HANDLE PortHandle, PPORT_MESSAGE RequestMessage){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14550,7 +14589,7 @@ NTSTATUS newZwRequestPort(HANDLE PortHandle, PPORT_MESSAGE RequestMessage){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14589,7 +14628,7 @@ NTSTATUS newZwRequestPort(HANDLE PortHandle, PPORT_MESSAGE RequestMessage){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRequestPort(PortHandle,RequestMessage);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRequestPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14641,7 +14680,7 @@ NTSTATUS newZwReplyPort(HANDLE PortHandle, PPORT_MESSAGE ReplyMessage){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14650,7 +14689,7 @@ NTSTATUS newZwReplyPort(HANDLE PortHandle, PPORT_MESSAGE ReplyMessage){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14689,7 +14728,7 @@ NTSTATUS newZwReplyPort(HANDLE PortHandle, PPORT_MESSAGE ReplyMessage){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReplyPort(PortHandle,ReplyMessage);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReplyPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14741,7 +14780,7 @@ NTSTATUS newZwReplyWaitReplyPort(HANDLE PortHandle, PPORT_MESSAGE ReplyMessage){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14750,7 +14789,7 @@ NTSTATUS newZwReplyWaitReplyPort(HANDLE PortHandle, PPORT_MESSAGE ReplyMessage){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14789,7 +14828,7 @@ NTSTATUS newZwReplyWaitReplyPort(HANDLE PortHandle, PPORT_MESSAGE ReplyMessage){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReplyWaitReplyPort(PortHandle,ReplyMessage);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReplyWaitReplyPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14841,7 +14880,7 @@ NTSTATUS newZwReplyWaitReceivePortEx(HANDLE PortHandle, PVOID *PortContext, PPOR
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14850,7 +14889,7 @@ NTSTATUS newZwReplyWaitReceivePortEx(HANDLE PortHandle, PVOID *PortContext, PPOR
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14889,7 +14928,7 @@ NTSTATUS newZwReplyWaitReceivePortEx(HANDLE PortHandle, PVOID *PortContext, PPOR
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReplyWaitReceivePortEx(PortHandle,PortContext,ReplyMessage,ReceiveMessage,Timeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReplyWaitReceivePortEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -14941,7 +14980,7 @@ NTSTATUS newZwReadRequestData(HANDLE PortHandle, PPORT_MESSAGE Message, ULONG In
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -14950,7 +14989,7 @@ NTSTATUS newZwReadRequestData(HANDLE PortHandle, PPORT_MESSAGE Message, ULONG In
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -14989,7 +15028,7 @@ NTSTATUS newZwReadRequestData(HANDLE PortHandle, PPORT_MESSAGE Message, ULONG In
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReadRequestData(PortHandle,Message,Index,Buffer,BufferLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReadRequestData.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15041,7 +15080,7 @@ NTSTATUS newZwWriteRequestData(HANDLE PortHandle, PPORT_MESSAGE Message, ULONG I
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15050,7 +15089,7 @@ NTSTATUS newZwWriteRequestData(HANDLE PortHandle, PPORT_MESSAGE Message, ULONG I
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15089,7 +15128,7 @@ NTSTATUS newZwWriteRequestData(HANDLE PortHandle, PPORT_MESSAGE Message, ULONG I
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwWriteRequestData(PortHandle,Message,Index,Buffer,BufferLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWriteRequestData.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15141,7 +15180,7 @@ NTSTATUS newZwQueryInformationPort(HANDLE PortHandle, PORT_INFORMATION_CLASS Por
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15150,7 +15189,7 @@ NTSTATUS newZwQueryInformationPort(HANDLE PortHandle, PORT_INFORMATION_CLASS Por
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15189,7 +15228,7 @@ NTSTATUS newZwQueryInformationPort(HANDLE PortHandle, PORT_INFORMATION_CLASS Por
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryInformationPort(PortHandle,PortInformationClass,PortInformation,PortInformationLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15241,7 +15280,7 @@ NTSTATUS newZwImpersonateClientOfPort(HANDLE PortHandle, PPORT_MESSAGE Message){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15250,7 +15289,7 @@ NTSTATUS newZwImpersonateClientOfPort(HANDLE PortHandle, PPORT_MESSAGE Message){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15289,7 +15328,7 @@ NTSTATUS newZwImpersonateClientOfPort(HANDLE PortHandle, PPORT_MESSAGE Message){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwImpersonateClientOfPort(PortHandle,Message);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwImpersonateClientOfPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15341,7 +15380,7 @@ NTSTATUS newZwCreateProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, PO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15350,7 +15389,7 @@ NTSTATUS newZwCreateProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, PO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15389,7 +15428,13 @@ NTSTATUS newZwCreateProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, PO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateProcess(ProcessHandle,DesiredAccess,ObjectAttributes,InheritFromProcessHandle,InheritHandles,SectionHandle,DebugPort,ExceptionPort);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	pid = getPIDByHandle(*ProcessHandle);
+	RtlInitEmptyUnicodeString(&uPid, processString, sizeof(WCHAR) * 70);
+	RtlIntegerToUnicodeString(pid, 10, &uPid);
+	RtlAppendUnicodeToString(&uFullString, L",arg1=");
+	RtlAppendUnicodeStringToString(&uFullString, &uPid);
+	
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15441,7 +15486,7 @@ NTSTATUS newZwCreateProcessEx(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15450,7 +15495,7 @@ NTSTATUS newZwCreateProcessEx(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15487,9 +15532,15 @@ NTSTATUS newZwCreateProcessEx(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, 
 	RtlAppendUnicodeStringToString(&uFullString, &uProcess);
 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
-	ntStatus = oldZwCreateProcessEx(ProcessHandle,DesiredAccess,oa,ParentProcess,InheritObjectTable,SectionHandle,DebugPort,ExceptionPort,arg9);;
+	ntStatus = oldZwCreateProcessEx(ProcessHandle,DesiredAccess,oa,ParentProcess,InheritObjectTable,SectionHandle,DebugPort,ExceptionPort,arg9);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	pid = getPIDByHandle(*ProcessHandle);
+	RtlInitEmptyUnicodeString(&uPid, processString, sizeof(WCHAR) * 70);
+	RtlIntegerToUnicodeString(pid, 10, &uPid);
+	RtlAppendUnicodeToString(&uFullString, L",arg1=");
+	RtlAppendUnicodeStringToString(&uFullString, &uPid);
+	
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateProcessEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15541,7 +15592,7 @@ NTSTATUS newZwOpenProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15550,7 +15601,7 @@ NTSTATUS newZwOpenProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, POBJ
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15589,7 +15640,7 @@ NTSTATUS newZwOpenProcess(PHANDLE ProcessHandle, ACCESS_MASK DesiredAccess, POBJ
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenProcess(ProcessHandle,DesiredAccess,ObjectAttributes,ClientId);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15641,7 +15692,7 @@ NTSTATUS newZwTerminateProcess(HANDLE ProcessHandle, NTSTATUS ExitStatus){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15650,7 +15701,7 @@ NTSTATUS newZwTerminateProcess(HANDLE ProcessHandle, NTSTATUS ExitStatus){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15689,7 +15740,7 @@ NTSTATUS newZwTerminateProcess(HANDLE ProcessHandle, NTSTATUS ExitStatus){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwTerminateProcess(ProcessHandle, ExitStatus);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwTerminateProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15741,7 +15792,7 @@ NTSTATUS newZwCreateThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15750,7 +15801,7 @@ NTSTATUS newZwCreateThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, POBJ
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15789,7 +15840,13 @@ NTSTATUS newZwCreateThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, POBJ
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateThread(ThreadHandle,DesiredAccess,ObjectAttributes,ProcessHandle,ClientId,ThreadContext,UserStack,CreateSuspended);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	pid = getTIDByHandle(*ThreadHandle);
+	RtlInitEmptyUnicodeString(&uPid, processString, sizeof(WCHAR) * 70);
+	RtlIntegerToUnicodeString(pid, 10, &uPid);
+	RtlAppendUnicodeToString(&uFullString, L",arg1=");
+	RtlAppendUnicodeStringToString(&uFullString, &uPid);
+	
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15841,7 +15898,7 @@ NTSTATUS newZwOpenThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, POBJEC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15850,7 +15907,7 @@ NTSTATUS newZwOpenThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, POBJEC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15889,7 +15946,7 @@ NTSTATUS newZwOpenThread(PHANDLE ThreadHandle, ACCESS_MASK DesiredAccess, POBJEC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenThread(ThreadHandle,DesiredAccess,ObjectAttributes,ClientId);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -15941,7 +15998,7 @@ NTSTATUS newZwTerminateThread(HANDLE ThreadHandle, NTSTATUS ExitStatus){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -15950,7 +16007,7 @@ NTSTATUS newZwTerminateThread(HANDLE ThreadHandle, NTSTATUS ExitStatus){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -15989,7 +16046,7 @@ NTSTATUS newZwTerminateThread(HANDLE ThreadHandle, NTSTATUS ExitStatus){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwTerminateThread(ThreadHandle,ExitStatus);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwTerminateThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16033,90 +16090,97 @@ NTSTATUS newZwQueryInformationThread(HANDLE ThreadHandle, THREADINFOCLASS Thread
 	
 	PIO_STACK_LOCATION stackLoc;
 	PIRP Irp;
-	
-	UNICODE_STRING uProcess = {0};
-	UNICODE_STRING uFullString = {0};
-	UNICODE_STRING uTime = {0};
-	UNICODE_STRING uPid= {0};
-	
-	ANSI_STRING ansiTime;
-	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
-	uFullString.MaximumLength = 950 * sizeof(WCHAR);
-	uPid.MaximumLength = 70 * sizeof(WCHAR);
-	
-	uPid.Length = 0;	
-	uProcess.Length = 0;
-	uFullString.Length = 0;
-	
-	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
-	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
-	if (fullString == NULL) {
-		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
-		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 550, 'icfs');
-	}	
-	
-	uProcess.Buffer = processString;
-	uFullString.Buffer = fullString;
-	uPid.Buffer = pidBuffer;
-	
-	timeIncrement = KeQueryTimeIncrement();
-	KeQueryTickCount(&currTimeStamp);
-	mSec.QuadPart = (currTimeStamp.QuadPart * timeIncrement) / 10000;
-	timeBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'offb');
-	uTime.Length = 0;
-	uTime.MaximumLength = 150 * sizeof(WCHAR);
-	uTime.Buffer = timeBuffer;
-	RtlStringCbPrintfA(aTime, sizeof(char) * 150, "%llu", mSec.QuadPart);
-	RtlInitAnsiString(&ansiTime, aTime);
-	RtlAnsiStringToUnicodeString(&uTime, &ansiTime, TRUE);
-	RtlAppendUnicodeToString(&uFullString, L"Time=");
-	RtlAppendUnicodeStringToString(&uFullString, &uTime);
-	RtlAppendUnicodeToString(&uFullString, L",");
-	
-	pid = getPIDByHandle(NtCurrentProcess());
-	RtlIntegerToUnicodeString(pid, 10, &uPid);
-	RtlAppendUnicodeToString(&uFullString, L"Pid=");
-	RtlAppendUnicodeStringToString(&uFullString, &uPid);
-	RtlAppendUnicodeToString(&uFullString, L",");	
-	
-	getPIDByThreadHandle(NtCurrentProcess(), &uProcess);
-	RtlAppendUnicodeToString(&uFullString, L"MethodName=ZwQueryInformationThread,"); 
-	RtlAppendUnicodeToString(&uFullString, L"ProcessName=");
-	RtlAppendUnicodeStringToString(&uFullString, &uProcess);
-
-	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
-	ntStatus = oldZwQueryInformationThread(ThreadHandle,ThreadInformationClass,ThreadInformation,ThreadInformationLength,ReturnLength);
-	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
-	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
-	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationThread.txt");
-	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
-	
-	//driverWriteFile(&uFullString, &uProcess, *oldZwOpenFile);
-	if (WRITE_DIRECT == 0) {
-		Irp = IoAllocateIrp((CCHAR) 1, FALSE);
-		if (Irp != NULL) {
-			Irp->Flags = IRP_BUFFERED_IO | IRP_WRITE_OPERATION;
-			Irp->AssociatedIrp.SystemBuffer = processString;
-			Irp->UserBuffer = fullString;
-			stackLoc = IoGetNextIrpStackLocation(Irp);
-			stackLoc->MajorFunction = IRP_MJ_WRITE;
-			stackLoc->MinorFunction = 0;
-			if (buddyDevice != NULL) {
-				IoCallDriver(buddyDevice, Irp);
-			}
-			IoFreeIrp(Irp);
-		}
+	if ((ReturnLength != NULL) && ((*ReturnLength) == 1234567890L)) {
+		ntStatus = oldZwQueryInformationThread(ThreadHandle,ThreadInformationClass,ThreadInformation,ThreadInformationLength,NULL);
+	}
+	else if ((ThreadInformationClass != NULL) && (ThreadInformationClass == ThreadBasicInformation)) {
+		ntStatus = oldZwQueryInformationThread(ThreadHandle,ThreadInformationClass,ThreadInformation,ThreadInformationLength,ReturnLength);
 	}
 	else {
-		driverWriteFile(&uFullString, &uProcess);
+		UNICODE_STRING uProcess = {0};
+		UNICODE_STRING uFullString = {0};
+		UNICODE_STRING uTime = {0};
+		UNICODE_STRING uPid= {0};
+		
+		ANSI_STRING ansiTime;
+		counter+=1;
+		uProcess.MaximumLength = 250 * sizeof(WCHAR);
+		uFullString.MaximumLength = 950 * sizeof(WCHAR);
+		uPid.MaximumLength = 70 * sizeof(WCHAR);
+		
+		uPid.Length = 0;	
+		uProcess.Length = 0;
+		uFullString.Length = 0;
+		
+		pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
+		processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
+		fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
+		if (fullString == NULL) {
+			DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
+			fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 550, 'icfs');
+		}	
+		
+		uProcess.Buffer = processString;
+		uFullString.Buffer = fullString;
+		uPid.Buffer = pidBuffer;
+		
+		timeIncrement = KeQueryTimeIncrement();
+		KeQueryTickCount(&currTimeStamp);
+		mSec.QuadPart = (currTimeStamp.QuadPart * timeIncrement) / 10000;
+		timeBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'offb');
+		uTime.Length = 0;
+		uTime.MaximumLength = 150 * sizeof(WCHAR);
+		uTime.Buffer = timeBuffer;
+		RtlStringCbPrintfA(aTime, sizeof(char) * 150, "%llu", mSec.QuadPart);
+		RtlInitAnsiString(&ansiTime, aTime);
+		RtlAnsiStringToUnicodeString(&uTime, &ansiTime, TRUE);
+		RtlAppendUnicodeToString(&uFullString, L"Time=");
+		RtlAppendUnicodeStringToString(&uFullString, &uTime);
+		RtlAppendUnicodeToString(&uFullString, L",");
+		
+		pid = getPIDByHandle(NtCurrentProcess());
+		RtlIntegerToUnicodeString(pid, 10, &uPid);
+		RtlAppendUnicodeToString(&uFullString, L"Pid=");
+		RtlAppendUnicodeStringToString(&uFullString, &uPid);
+		RtlAppendUnicodeToString(&uFullString, L",");	
+		
+		getPIDByThreadHandle(NtCurrentProcess(), &uProcess);
+		RtlAppendUnicodeToString(&uFullString, L"MethodName=ZwQueryInformationThread,"); 
+		RtlAppendUnicodeToString(&uFullString, L"ProcessName=");
+		RtlAppendUnicodeStringToString(&uFullString, &uProcess);
+
+		//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
+		ntStatus = oldZwQueryInformationThread(ThreadHandle,ThreadInformationClass,ThreadInformation,ThreadInformationLength,ReturnLength);
+		
+		RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
+		//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
+		RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationThread.txt");
+		RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
+		
+		//driverWriteFile(&uFullString, &uProcess, *oldZwOpenFile);
+		if (WRITE_DIRECT == 0) {
+			Irp = IoAllocateIrp((CCHAR) 1, FALSE);
+			if (Irp != NULL) {
+				Irp->Flags = IRP_BUFFERED_IO | IRP_WRITE_OPERATION;
+				Irp->AssociatedIrp.SystemBuffer = processString;
+				Irp->UserBuffer = fullString;
+				stackLoc = IoGetNextIrpStackLocation(Irp);
+				stackLoc->MajorFunction = IRP_MJ_WRITE;
+				stackLoc->MinorFunction = 0;
+				if (buddyDevice != NULL) {
+					IoCallDriver(buddyDevice, Irp);
+				}
+				IoFreeIrp(Irp);
+			}
+		}
+		else {
+			driverWriteFile(&uFullString, &uProcess);
+		}
+		ExFreePool(processString);
+		ExFreePool(fullString);
+		ExFreePool(timeBuffer);
+		ExFreePool(pidBuffer);
 	}
-	ExFreePool(processString);
-	ExFreePool(fullString);
-	ExFreePool(timeBuffer);
-	ExFreePool(pidBuffer);
 	return ntStatus;
 }		
 NTSTATUS newZwSetInformationThread(HANDLE ThreadHandle, THREADINFOCLASS ThreadInformationClass, PVOID ThreadInformation, ULONG ThreadInformationLength){
@@ -16141,7 +16205,7 @@ NTSTATUS newZwSetInformationThread(HANDLE ThreadHandle, THREADINFOCLASS ThreadIn
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16150,7 +16214,7 @@ NTSTATUS newZwSetInformationThread(HANDLE ThreadHandle, THREADINFOCLASS ThreadIn
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16189,7 +16253,7 @@ NTSTATUS newZwSetInformationThread(HANDLE ThreadHandle, THREADINFOCLASS ThreadIn
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationThread(ThreadHandle,ThreadInformationClass,ThreadInformation,ThreadInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16241,7 +16305,7 @@ NTSTATUS newZwSuspendThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16250,7 +16314,7 @@ NTSTATUS newZwSuspendThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16289,7 +16353,7 @@ NTSTATUS newZwSuspendThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSuspendThread(ThreadHandle,PreviousSuspendCount);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSuspendThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16341,7 +16405,7 @@ NTSTATUS newZwResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16350,7 +16414,7 @@ NTSTATUS newZwResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16389,7 +16453,7 @@ NTSTATUS newZwResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwResumeThread(ThreadHandle,PreviousSuspendCount);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwResumeThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16441,7 +16505,7 @@ NTSTATUS newZwQueueApcThread(HANDLE ThreadHandle, PKNORMAL_ROUTINE ApcRoutine, P
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16450,7 +16514,7 @@ NTSTATUS newZwQueueApcThread(HANDLE ThreadHandle, PKNORMAL_ROUTINE ApcRoutine, P
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16489,7 +16553,7 @@ NTSTATUS newZwQueueApcThread(HANDLE ThreadHandle, PKNORMAL_ROUTINE ApcRoutine, P
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueueApcThread(ThreadHandle,ApcRoutine,ApcContext,Argument1,Argument2);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueueApcThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16542,7 +16606,7 @@ NTSTATUS newZwTestAlert(){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16551,7 +16615,7 @@ NTSTATUS newZwTestAlert(){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16590,7 +16654,7 @@ NTSTATUS newZwTestAlert(){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwTestAlert();
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwTestAlert.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16642,7 +16706,7 @@ NTSTATUS newZwAlertThread(HANDLE ThreadHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16651,7 +16715,7 @@ NTSTATUS newZwAlertThread(HANDLE ThreadHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16690,7 +16754,7 @@ NTSTATUS newZwAlertThread(HANDLE ThreadHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAlertThread(ThreadHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAlertThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16742,7 +16806,7 @@ NTSTATUS newZwAlertResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16751,7 +16815,7 @@ NTSTATUS newZwAlertResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16790,7 +16854,7 @@ NTSTATUS newZwAlertResumeThread(HANDLE ThreadHandle, PULONG PreviousSuspendCount
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAlertResumeThread(ThreadHandle,PreviousSuspendCount);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAlertResumeThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16842,7 +16906,7 @@ NTSTATUS newZwRegisterThreadTerminatePort(HANDLE PortHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16851,7 +16915,7 @@ NTSTATUS newZwRegisterThreadTerminatePort(HANDLE PortHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16890,7 +16954,7 @@ NTSTATUS newZwRegisterThreadTerminatePort(HANDLE PortHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRegisterThreadTerminatePort(PortHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRegisterThreadTerminatePort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -16942,7 +17006,7 @@ NTSTATUS newZwImpersonateThread(HANDLE ThreadHandle, HANDLE TargetThreadHandle, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -16951,7 +17015,7 @@ NTSTATUS newZwImpersonateThread(HANDLE ThreadHandle, HANDLE TargetThreadHandle, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -16990,7 +17054,7 @@ NTSTATUS newZwImpersonateThread(HANDLE ThreadHandle, HANDLE TargetThreadHandle, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwImpersonateThread(ThreadHandle,TargetThreadHandle,SecurityQos);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwImpersonateThread.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17042,7 +17106,7 @@ NTSTATUS newZwImpersonateAnonymousToken(HANDLE ThreadHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17051,7 +17115,7 @@ NTSTATUS newZwImpersonateAnonymousToken(HANDLE ThreadHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17090,7 +17154,7 @@ NTSTATUS newZwImpersonateAnonymousToken(HANDLE ThreadHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwImpersonateAnonymousToken(ThreadHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwImpersonateAnonymousToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17142,7 +17206,7 @@ NTSTATUS newZwQuerySystemEnvironmentValue(PUNICODE_STRING Name, PVOID Value, ULO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17151,7 +17215,7 @@ NTSTATUS newZwQuerySystemEnvironmentValue(PUNICODE_STRING Name, PVOID Value, ULO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17190,7 +17254,7 @@ NTSTATUS newZwQuerySystemEnvironmentValue(PUNICODE_STRING Name, PVOID Value, ULO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySystemEnvironmentValue(Name,Value,ValueLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySystemEnvironmentValue.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17242,7 +17306,7 @@ NTSTATUS newZwQuerySystemEnvironmentValueEx(PUNICODE_STRING name, LPGUID vendor,
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17251,7 +17315,7 @@ NTSTATUS newZwQuerySystemEnvironmentValueEx(PUNICODE_STRING name, LPGUID vendor,
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17290,7 +17354,7 @@ NTSTATUS newZwQuerySystemEnvironmentValueEx(PUNICODE_STRING name, LPGUID vendor,
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySystemEnvironmentValueEx(name,vendor,value,retlength,attrib);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySystemEnvironmentValueEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17342,7 +17406,7 @@ NTSTATUS newZwSetSystemEnvironmentValue(PUNICODE_STRING Name, PUNICODE_STRING Va
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17351,7 +17415,7 @@ NTSTATUS newZwSetSystemEnvironmentValue(PUNICODE_STRING Name, PUNICODE_STRING Va
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17390,7 +17454,7 @@ NTSTATUS newZwSetSystemEnvironmentValue(PUNICODE_STRING Name, PUNICODE_STRING Va
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetSystemEnvironmentValue(Name,Value);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetSystemEnvironmentValue.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17442,7 +17506,7 @@ NTSTATUS newZwSetSystemEnvironmentValueEx(PUNICODE_STRING VariableName, LPGUID V
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17451,7 +17515,7 @@ NTSTATUS newZwSetSystemEnvironmentValueEx(PUNICODE_STRING VariableName, LPGUID V
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17490,7 +17554,7 @@ NTSTATUS newZwSetSystemEnvironmentValueEx(PUNICODE_STRING VariableName, LPGUID V
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetSystemEnvironmentValueEx(VariableName,VendorGuid,Value,ValueLength,Attributes);;
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetSystemEnvironmentValueEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17542,7 +17606,7 @@ NTSTATUS newZwShutdownSystem(SHUTDOWN_ACTION Action){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17551,7 +17615,7 @@ NTSTATUS newZwShutdownSystem(SHUTDOWN_ACTION Action){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17590,7 +17654,7 @@ NTSTATUS newZwShutdownSystem(SHUTDOWN_ACTION Action){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwShutdownSystem(Action);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwShutdownSystem.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17642,7 +17706,7 @@ NTSTATUS newZwSystemDebugControl(DEBUG_CONTROL_CODE ControlCode, PVOID InputBuff
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17651,7 +17715,7 @@ NTSTATUS newZwSystemDebugControl(DEBUG_CONTROL_CODE ControlCode, PVOID InputBuff
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17690,7 +17754,7 @@ NTSTATUS newZwSystemDebugControl(DEBUG_CONTROL_CODE ControlCode, PVOID InputBuff
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSystemDebugControl(ControlCode,InputBuffer,InputBufferLength,OutputBuffer,OutputBufferLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSystemDebugControl.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17742,7 +17806,7 @@ NTSTATUS newZwQueryObject(HANDLE ObjectHandle, OBJECT_INFORMATION_CLASS ObjectIn
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17751,7 +17815,7 @@ NTSTATUS newZwQueryObject(HANDLE ObjectHandle, OBJECT_INFORMATION_CLASS ObjectIn
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17790,7 +17854,7 @@ NTSTATUS newZwQueryObject(HANDLE ObjectHandle, OBJECT_INFORMATION_CLASS ObjectIn
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryObject(ObjectHandle,ObjectInformationClass,ObjectInformation,ObjectInformationLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17842,7 +17906,7 @@ NTSTATUS newZwSetInformationObject(HANDLE ObjectHandle, OBJECT_INFORMATION_CLASS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17851,7 +17915,7 @@ NTSTATUS newZwSetInformationObject(HANDLE ObjectHandle, OBJECT_INFORMATION_CLASS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17890,7 +17954,7 @@ NTSTATUS newZwSetInformationObject(HANDLE ObjectHandle, OBJECT_INFORMATION_CLASS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationObject(ObjectHandle,ObjectInformationClass,ObjectInformation,ObjectInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -17942,7 +18006,7 @@ NTSTATUS newZwDuplicateObject(HANDLE SourceProcessHandle, HANDLE SourceHandle, H
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -17951,7 +18015,7 @@ NTSTATUS newZwDuplicateObject(HANDLE SourceProcessHandle, HANDLE SourceHandle, H
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -17990,7 +18054,7 @@ NTSTATUS newZwDuplicateObject(HANDLE SourceProcessHandle, HANDLE SourceHandle, H
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDuplicateObject(SourceProcessHandle,SourceHandle,TargetProcessHandle,TargetHandle,DesiredAccess,Attributes,Options);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDuplicateObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18042,7 +18106,7 @@ NTSTATUS newZwMakeTemporaryObject(HANDLE Handle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18051,7 +18115,7 @@ NTSTATUS newZwMakeTemporaryObject(HANDLE Handle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18090,7 +18154,7 @@ NTSTATUS newZwMakeTemporaryObject(HANDLE Handle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwMakeTemporaryObject(Handle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMakeTemporaryObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18142,7 +18206,7 @@ NTSTATUS newZwSetSecurityObject(HANDLE Handle, SECURITY_INFORMATION SecurityInfo
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18151,7 +18215,7 @@ NTSTATUS newZwSetSecurityObject(HANDLE Handle, SECURITY_INFORMATION SecurityInfo
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18190,7 +18254,7 @@ NTSTATUS newZwSetSecurityObject(HANDLE Handle, SECURITY_INFORMATION SecurityInfo
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetSecurityObject(Handle,SecurityInformation,SecurityDescriptor);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetSecurityObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18242,7 +18306,7 @@ NTSTATUS newZwCreateDirectoryObject(PHANDLE DirectoryHandle, ACCESS_MASK Desired
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18251,7 +18315,7 @@ NTSTATUS newZwCreateDirectoryObject(PHANDLE DirectoryHandle, ACCESS_MASK Desired
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18290,7 +18354,7 @@ NTSTATUS newZwCreateDirectoryObject(PHANDLE DirectoryHandle, ACCESS_MASK Desired
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateDirectoryObject(DirectoryHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateDirectoryObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18342,7 +18406,7 @@ NTSTATUS newZwOpenDirectoryObject(PHANDLE DirectoryHandle, ACCESS_MASK DesiredAc
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18351,7 +18415,7 @@ NTSTATUS newZwOpenDirectoryObject(PHANDLE DirectoryHandle, ACCESS_MASK DesiredAc
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18390,7 +18454,7 @@ NTSTATUS newZwOpenDirectoryObject(PHANDLE DirectoryHandle, ACCESS_MASK DesiredAc
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenDirectoryObject(DirectoryHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenDirectoryObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18442,7 +18506,7 @@ NTSTATUS newZwQueryDirectoryObject(HANDLE DirectoryHandle, PVOID Buffer, ULONG B
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18451,7 +18515,7 @@ NTSTATUS newZwQueryDirectoryObject(HANDLE DirectoryHandle, PVOID Buffer, ULONG B
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18490,7 +18554,7 @@ NTSTATUS newZwQueryDirectoryObject(HANDLE DirectoryHandle, PVOID Buffer, ULONG B
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryDirectoryObject(DirectoryHandle,Buffer,BufferLength,ReturnSingleEntry,RestartScan,Context,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryDirectoryObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18542,7 +18606,7 @@ NTSTATUS newZwCreateSymbolicLinkObject(PHANDLE SymbolicLinkHandle, ACCESS_MASK D
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18551,7 +18615,7 @@ NTSTATUS newZwCreateSymbolicLinkObject(PHANDLE SymbolicLinkHandle, ACCESS_MASK D
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18590,7 +18654,7 @@ NTSTATUS newZwCreateSymbolicLinkObject(PHANDLE SymbolicLinkHandle, ACCESS_MASK D
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateSymbolicLinkObject(SymbolicLinkHandle,DesiredAccess,ObjectAttributes,TargetName);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateSymbolicLinkObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18642,7 +18706,7 @@ NTSTATUS newZwOpenSymbolicLinkObject(PHANDLE SymbolicLinkHandle, ACCESS_MASK Des
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18651,7 +18715,7 @@ NTSTATUS newZwOpenSymbolicLinkObject(PHANDLE SymbolicLinkHandle, ACCESS_MASK Des
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18690,7 +18754,7 @@ NTSTATUS newZwOpenSymbolicLinkObject(PHANDLE SymbolicLinkHandle, ACCESS_MASK Des
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenSymbolicLinkObject(SymbolicLinkHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenSymbolicLinkObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18742,7 +18806,7 @@ NTSTATUS newZwQuerySymbolicLinkObject(HANDLE SymbolicLinkHandle, PUNICODE_STRING
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18751,7 +18815,7 @@ NTSTATUS newZwQuerySymbolicLinkObject(HANDLE SymbolicLinkHandle, PUNICODE_STRING
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18790,7 +18854,7 @@ NTSTATUS newZwQuerySymbolicLinkObject(HANDLE SymbolicLinkHandle, PUNICODE_STRING
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySymbolicLinkObject(SymbolicLinkHandle,TargetName,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySymbolicLinkObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18842,7 +18906,7 @@ NTSTATUS newZwCreateSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, PO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18851,7 +18915,7 @@ NTSTATUS newZwCreateSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, PO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18890,7 +18954,7 @@ NTSTATUS newZwCreateSection(PHANDLE SectionHandle, ACCESS_MASK DesiredAccess, PO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateSection(SectionHandle,DesiredAccess,ObjectAttributes,SectionSize,Protect,Attributes,FileHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateSection.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -18942,7 +19006,7 @@ NTSTATUS newZwQuerySection(HANDLE SectionHandle, SECTION_INFORMATION_CLASS Secti
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -18951,7 +19015,7 @@ NTSTATUS newZwQuerySection(HANDLE SectionHandle, SECTION_INFORMATION_CLASS Secti
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -18990,7 +19054,7 @@ NTSTATUS newZwQuerySection(HANDLE SectionHandle, SECTION_INFORMATION_CLASS Secti
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySection(SectionHandle,SectionInformationClass,SectionInformation,SectionInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySection.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19042,7 +19106,7 @@ NTSTATUS newZwExtendSection(HANDLE SectionHandle, PLARGE_INTEGER SectionSize){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19051,7 +19115,7 @@ NTSTATUS newZwExtendSection(HANDLE SectionHandle, PLARGE_INTEGER SectionSize){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19090,7 +19154,7 @@ NTSTATUS newZwExtendSection(HANDLE SectionHandle, PLARGE_INTEGER SectionSize){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwExtendSection(SectionHandle,SectionSize);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwExtendSection.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19142,7 +19206,7 @@ NTSTATUS newZwUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19151,7 +19215,7 @@ NTSTATUS newZwUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19190,7 +19254,7 @@ NTSTATUS newZwUnmapViewOfSection(HANDLE ProcessHandle, PVOID BaseAddress){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwUnmapViewOfSection(ProcessHandle,BaseAddress);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwUnmapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19242,7 +19306,7 @@ NTSTATUS newZwAreMappedFilesTheSame(PVOID Address1, PVOID Address2){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19251,7 +19315,7 @@ NTSTATUS newZwAreMappedFilesTheSame(PVOID Address1, PVOID Address2){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19290,7 +19354,7 @@ NTSTATUS newZwAreMappedFilesTheSame(PVOID Address1, PVOID Address2){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAreMappedFilesTheSame(Address1,Address2);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAreMappedFilesTheSame.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19342,7 +19406,7 @@ NTSTATUS newZwCreateJobObject(PHANDLE JobHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19351,7 +19415,7 @@ NTSTATUS newZwCreateJobObject(PHANDLE JobHandle, ACCESS_MASK DesiredAccess, POBJ
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19390,7 +19454,7 @@ NTSTATUS newZwCreateJobObject(PHANDLE JobHandle, ACCESS_MASK DesiredAccess, POBJ
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateJobObject(JobHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateJobObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19442,7 +19506,7 @@ NTSTATUS newZwOpenJobObject(PHANDLE JobHandle, ACCESS_MASK DesiredAccess, POBJEC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19451,7 +19515,7 @@ NTSTATUS newZwOpenJobObject(PHANDLE JobHandle, ACCESS_MASK DesiredAccess, POBJEC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19490,7 +19554,7 @@ NTSTATUS newZwOpenJobObject(PHANDLE JobHandle, ACCESS_MASK DesiredAccess, POBJEC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenJobObject(JobHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenJobObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19542,7 +19606,7 @@ NTSTATUS newZwTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19551,7 +19615,7 @@ NTSTATUS newZwTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19590,7 +19654,7 @@ NTSTATUS newZwTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwTerminateJobObject(JobHandle, ExitStatus);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwTerminateJobObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19642,7 +19706,7 @@ NTSTATUS newZwAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19651,7 +19715,7 @@ NTSTATUS newZwAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19690,7 +19754,7 @@ NTSTATUS newZwAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAssignProcessToJobObject(JobHandle,ProcessHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAssignProcessToJobObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19742,7 +19806,7 @@ NTSTATUS newZwQueryInformationJobObject(HANDLE JobHandle, JOBOBJECTINFOCLASS Job
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19751,7 +19815,7 @@ NTSTATUS newZwQueryInformationJobObject(HANDLE JobHandle, JOBOBJECTINFOCLASS Job
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19790,7 +19854,7 @@ NTSTATUS newZwQueryInformationJobObject(HANDLE JobHandle, JOBOBJECTINFOCLASS Job
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryInformationJobObject(JobHandle,JobInformationClass,JobInformation,JobInformationLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationJobObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19842,7 +19906,7 @@ NTSTATUS newZwSetInformationJobObject(HANDLE JobHandle, JOBOBJECTINFOCLASS JobIn
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19851,7 +19915,7 @@ NTSTATUS newZwSetInformationJobObject(HANDLE JobHandle, JOBOBJECTINFOCLASS JobIn
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19890,7 +19954,7 @@ NTSTATUS newZwSetInformationJobObject(HANDLE JobHandle, JOBOBJECTINFOCLASS JobIn
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationJobObject(JobHandle,JobInformationClass,JobInformation,JobInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationJobObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -19942,7 +20006,7 @@ NTSTATUS newZwCreateToken(PHANDLE TokenHandle, ACCESS_MASK DesiredAccess, POBJEC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -19951,7 +20015,7 @@ NTSTATUS newZwCreateToken(PHANDLE TokenHandle, ACCESS_MASK DesiredAccess, POBJEC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -19990,7 +20054,7 @@ NTSTATUS newZwCreateToken(PHANDLE TokenHandle, ACCESS_MASK DesiredAccess, POBJEC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateToken(TokenHandle,DesiredAccess,ObjectAttributes,Type,AuthenticationId,ExpirationTime,User,Groups,Privileges,Owner,PrimaryGroup,DefaultDacl,Source);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20042,7 +20106,7 @@ NTSTATUS newZwOpenProcessToken(HANDLE ProcessHandle, ACCESS_MASK DesiredAccess, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20051,7 +20115,7 @@ NTSTATUS newZwOpenProcessToken(HANDLE ProcessHandle, ACCESS_MASK DesiredAccess, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20090,7 +20154,7 @@ NTSTATUS newZwOpenProcessToken(HANDLE ProcessHandle, ACCESS_MASK DesiredAccess, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenProcessToken(ProcessHandle,DesiredAccess,TokenHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenProcessToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20142,7 +20206,7 @@ NTSTATUS newZwOpenProcessTokenEx(HANDLE ProcessHandle, ACCESS_MASK DesiredAccess
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20151,7 +20215,7 @@ NTSTATUS newZwOpenProcessTokenEx(HANDLE ProcessHandle, ACCESS_MASK DesiredAccess
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20190,7 +20254,7 @@ NTSTATUS newZwOpenProcessTokenEx(HANDLE ProcessHandle, ACCESS_MASK DesiredAccess
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenProcessTokenEx(ProcessHandle,DesiredAccess,HandleAttributes,TokenHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenProcessTokenEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20242,7 +20306,7 @@ NTSTATUS newZwDuplicateToken(HANDLE ExistingTokenHandle, ACCESS_MASK DesiredAcce
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20251,7 +20315,7 @@ NTSTATUS newZwDuplicateToken(HANDLE ExistingTokenHandle, ACCESS_MASK DesiredAcce
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20290,7 +20354,7 @@ NTSTATUS newZwDuplicateToken(HANDLE ExistingTokenHandle, ACCESS_MASK DesiredAcce
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDuplicateToken(ExistingTokenHandle,DesiredAccess,ObjectAttributes,EffectiveOnly,TokenType,NewTokenHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDuplicateToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20342,7 +20406,7 @@ NTSTATUS newZwFilterToken(HANDLE ExistingTokenHandle, ULONG Flags, PTOKEN_GROUPS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20351,7 +20415,7 @@ NTSTATUS newZwFilterToken(HANDLE ExistingTokenHandle, ULONG Flags, PTOKEN_GROUPS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20390,7 +20454,7 @@ NTSTATUS newZwFilterToken(HANDLE ExistingTokenHandle, ULONG Flags, PTOKEN_GROUPS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFilterToken(ExistingTokenHandle,Flags,SidsToDisable,PrivilegesToDelete,SidsToRestricted,NewTokenHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFilterToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20442,7 +20506,7 @@ NTSTATUS newZwAdjustPrivilegesToken(HANDLE TokenHandle, BOOLEAN DisableAllPrivil
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20451,7 +20515,7 @@ NTSTATUS newZwAdjustPrivilegesToken(HANDLE TokenHandle, BOOLEAN DisableAllPrivil
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20490,7 +20554,7 @@ NTSTATUS newZwAdjustPrivilegesToken(HANDLE TokenHandle, BOOLEAN DisableAllPrivil
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAdjustPrivilegesToken(TokenHandle,DisableAllPrivileges,NewState,BufferLength,PreviousState,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAdjustPrivilegesToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20542,7 +20606,7 @@ NTSTATUS newZwAdjustGroupsToken(HANDLE TokenHandle, BOOLEAN ResetToDefault, PTOK
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20551,7 +20615,7 @@ NTSTATUS newZwAdjustGroupsToken(HANDLE TokenHandle, BOOLEAN ResetToDefault, PTOK
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20590,7 +20654,7 @@ NTSTATUS newZwAdjustGroupsToken(HANDLE TokenHandle, BOOLEAN ResetToDefault, PTOK
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAdjustGroupsToken(TokenHandle,ResetToDefault,NewState,BufferLength,PreviousState,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAdjustGroupsToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20642,7 +20706,7 @@ NTSTATUS newZwSetInformationToken(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS To
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20651,7 +20715,7 @@ NTSTATUS newZwSetInformationToken(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS To
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20690,7 +20754,7 @@ NTSTATUS newZwSetInformationToken(HANDLE TokenHandle, TOKEN_INFORMATION_CLASS To
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetInformationToken(TokenHandle,TokenInformationClass,TokenInformation,TokenInformationLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetInformationToken.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20742,7 +20806,7 @@ NTSTATUS newZwSignalAndWaitForSingleObject(HANDLE HandleToSignal, HANDLE HandleT
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20751,7 +20815,7 @@ NTSTATUS newZwSignalAndWaitForSingleObject(HANDLE HandleToSignal, HANDLE HandleT
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20790,7 +20854,7 @@ NTSTATUS newZwSignalAndWaitForSingleObject(HANDLE HandleToSignal, HANDLE HandleT
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSignalAndWaitForSingleObject(HandleToSignal,HandleToWait,Alertable,Timeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSignalAndWaitForSingleObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20842,7 +20906,7 @@ NTSTATUS newZwWaitForMultipleObjects(ULONG HandleCount, PHANDLE Handles, WAIT_TY
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20851,7 +20915,7 @@ NTSTATUS newZwWaitForMultipleObjects(ULONG HandleCount, PHANDLE Handles, WAIT_TY
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20890,7 +20954,7 @@ NTSTATUS newZwWaitForMultipleObjects(ULONG HandleCount, PHANDLE Handles, WAIT_TY
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwWaitForMultipleObjects(HandleCount,Handles,WaitType,Alertable,Timeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWaitForMultipleObjects.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -20942,7 +21006,7 @@ NTSTATUS newZwCreateTimer(PHANDLE TimerHandle, ACCESS_MASK DesiredAccess, POBJEC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -20951,7 +21015,7 @@ NTSTATUS newZwCreateTimer(PHANDLE TimerHandle, ACCESS_MASK DesiredAccess, POBJEC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -20990,7 +21054,7 @@ NTSTATUS newZwCreateTimer(PHANDLE TimerHandle, ACCESS_MASK DesiredAccess, POBJEC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateTimer(TimerHandle,DesiredAccess,ObjectAttributes,TimerType);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateTimer.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21042,7 +21106,7 @@ NTSTATUS newZwOpenTimer(PHANDLE TimerHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21051,7 +21115,7 @@ NTSTATUS newZwOpenTimer(PHANDLE TimerHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21090,7 +21154,7 @@ NTSTATUS newZwOpenTimer(PHANDLE TimerHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenTimer(TimerHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenTimer.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21142,7 +21206,7 @@ NTSTATUS newZwCancelTimer(HANDLE TimerHandle, PBOOLEAN PreviousState){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21151,7 +21215,7 @@ NTSTATUS newZwCancelTimer(HANDLE TimerHandle, PBOOLEAN PreviousState){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21190,7 +21254,7 @@ NTSTATUS newZwCancelTimer(HANDLE TimerHandle, PBOOLEAN PreviousState){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCancelTimer(TimerHandle,PreviousState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCancelTimer.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21242,7 +21306,7 @@ NTSTATUS newZwSetTimer(HANDLE TimerHandle, PLARGE_INTEGER DueTime, PTIMER_APC_RO
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21251,7 +21315,7 @@ NTSTATUS newZwSetTimer(HANDLE TimerHandle, PLARGE_INTEGER DueTime, PTIMER_APC_RO
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21290,7 +21354,7 @@ NTSTATUS newZwSetTimer(HANDLE TimerHandle, PLARGE_INTEGER DueTime, PTIMER_APC_RO
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetTimer(TimerHandle,DueTime,TimerApcRoutine,TimerContext,Resume,Period,PreviousState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetTimer.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21342,7 +21406,7 @@ NTSTATUS newZwQueryTimer(HANDLE TimerHandle, TIMER_INFORMATION_CLASS TimerInform
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21351,7 +21415,7 @@ NTSTATUS newZwQueryTimer(HANDLE TimerHandle, TIMER_INFORMATION_CLASS TimerInform
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21390,7 +21454,7 @@ NTSTATUS newZwQueryTimer(HANDLE TimerHandle, TIMER_INFORMATION_CLASS TimerInform
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryTimer(TimerHandle,TimerInformationClass,TimerInformation,TimerInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryTimer.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21442,7 +21506,7 @@ NTSTATUS newZwCreateEvent(PHANDLE EventHandle, ACCESS_MASK DesiredAccess, POBJEC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21451,7 +21515,7 @@ NTSTATUS newZwCreateEvent(PHANDLE EventHandle, ACCESS_MASK DesiredAccess, POBJEC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21490,7 +21554,7 @@ NTSTATUS newZwCreateEvent(PHANDLE EventHandle, ACCESS_MASK DesiredAccess, POBJEC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateEvent(EventHandle,DesiredAccess,ObjectAttributes,EventType,InitialState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21542,7 +21606,7 @@ NTSTATUS newZwOpenEvent(PHANDLE EventHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21551,7 +21615,7 @@ NTSTATUS newZwOpenEvent(PHANDLE EventHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21590,7 +21654,7 @@ NTSTATUS newZwOpenEvent(PHANDLE EventHandle, ACCESS_MASK DesiredAccess, POBJECT_
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenEvent(EventHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21642,7 +21706,7 @@ NTSTATUS newZwPulseEvent(HANDLE EventHandle, PULONG PreviousState){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21651,7 +21715,7 @@ NTSTATUS newZwPulseEvent(HANDLE EventHandle, PULONG PreviousState){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21690,7 +21754,7 @@ NTSTATUS newZwPulseEvent(HANDLE EventHandle, PULONG PreviousState){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwPulseEvent(EventHandle,PreviousState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwPulseEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21742,7 +21806,7 @@ NTSTATUS newZwResetEvent(HANDLE EventHandle, PULONG PreviousState){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21751,7 +21815,7 @@ NTSTATUS newZwResetEvent(HANDLE EventHandle, PULONG PreviousState){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21790,7 +21854,7 @@ NTSTATUS newZwResetEvent(HANDLE EventHandle, PULONG PreviousState){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwResetEvent(EventHandle,PreviousState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwResetEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21842,7 +21906,7 @@ NTSTATUS newZwClearEvent(HANDLE EventHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21851,7 +21915,7 @@ NTSTATUS newZwClearEvent(HANDLE EventHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21890,7 +21954,7 @@ NTSTATUS newZwClearEvent(HANDLE EventHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwClearEvent(EventHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwClearEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -21942,7 +22006,7 @@ NTSTATUS newZwQueryEvent(HANDLE EventHandle, EVENT_INFORMATION_CLASS EventInform
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -21951,7 +22015,7 @@ NTSTATUS newZwQueryEvent(HANDLE EventHandle, EVENT_INFORMATION_CLASS EventInform
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -21990,7 +22054,7 @@ NTSTATUS newZwQueryEvent(HANDLE EventHandle, EVENT_INFORMATION_CLASS EventInform
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryEvent(EventHandle,EventInformationClass,EventInformation,EventInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22042,7 +22106,7 @@ NTSTATUS newZwCreateSemaphore(PHANDLE SemaphoreHandle, ACCESS_MASK DesiredAccess
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22051,7 +22115,7 @@ NTSTATUS newZwCreateSemaphore(PHANDLE SemaphoreHandle, ACCESS_MASK DesiredAccess
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22090,7 +22154,7 @@ NTSTATUS newZwCreateSemaphore(PHANDLE SemaphoreHandle, ACCESS_MASK DesiredAccess
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateSemaphore(SemaphoreHandle,DesiredAccess,ObjectAttributes,InitialCount,MaximumCount);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateSemaphore.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22142,7 +22206,7 @@ NTSTATUS newZwOpenSemaphore(PHANDLE SemaphoreHandle, ACCESS_MASK DesiredAccess, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22151,7 +22215,7 @@ NTSTATUS newZwOpenSemaphore(PHANDLE SemaphoreHandle, ACCESS_MASK DesiredAccess, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22190,7 +22254,7 @@ NTSTATUS newZwOpenSemaphore(PHANDLE SemaphoreHandle, ACCESS_MASK DesiredAccess, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenSemaphore(SemaphoreHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenSemaphore.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22242,7 +22306,7 @@ NTSTATUS newZwReleaseSemaphore(HANDLE SemaphoreHandle, LONG ReleaseCount, PLONG 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22251,7 +22315,7 @@ NTSTATUS newZwReleaseSemaphore(HANDLE SemaphoreHandle, LONG ReleaseCount, PLONG 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22290,7 +22354,7 @@ NTSTATUS newZwReleaseSemaphore(HANDLE SemaphoreHandle, LONG ReleaseCount, PLONG 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReleaseSemaphore(SemaphoreHandle,ReleaseCount,PreviousCount);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReleaseSemaphore.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22342,7 +22406,7 @@ NTSTATUS newZwQuerySemaphore(HANDLE SemaphoreHandle, SEMAPHORE_INFORMATION_CLASS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22351,7 +22415,7 @@ NTSTATUS newZwQuerySemaphore(HANDLE SemaphoreHandle, SEMAPHORE_INFORMATION_CLASS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22390,7 +22454,7 @@ NTSTATUS newZwQuerySemaphore(HANDLE SemaphoreHandle, SEMAPHORE_INFORMATION_CLASS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQuerySemaphore(SemaphoreHandle,SemaphoreInformationClass,SemaphoreInformation,SemaphoreInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQuerySemaphore.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22442,7 +22506,7 @@ NTSTATUS newZwCreateMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJ
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22451,7 +22515,7 @@ NTSTATUS newZwCreateMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJ
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22490,7 +22554,7 @@ NTSTATUS newZwCreateMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJ
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateMutant(MutantHandle,DesiredAccess,ObjectAttributes,InitialOwner);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateMutant.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22542,7 +22606,7 @@ NTSTATUS newZwOpenMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJEC
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22551,7 +22615,7 @@ NTSTATUS newZwOpenMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJEC
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22590,7 +22654,7 @@ NTSTATUS newZwOpenMutant(PHANDLE MutantHandle, ACCESS_MASK DesiredAccess, POBJEC
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenMutant(MutantHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenMutant.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22642,7 +22706,7 @@ NTSTATUS newZwReleaseMutant(HANDLE MutantHandle, PULONG PreviousState){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22651,7 +22715,7 @@ NTSTATUS newZwReleaseMutant(HANDLE MutantHandle, PULONG PreviousState){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22690,7 +22754,7 @@ NTSTATUS newZwReleaseMutant(HANDLE MutantHandle, PULONG PreviousState){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwReleaseMutant(MutantHandle,PreviousState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwReleaseMutant.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22742,7 +22806,7 @@ NTSTATUS newZwQueryMutant(HANDLE MutantHandle, MUTANT_INFORMATION_CLASS MutantIn
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22751,7 +22815,7 @@ NTSTATUS newZwQueryMutant(HANDLE MutantHandle, MUTANT_INFORMATION_CLASS MutantIn
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22790,7 +22854,7 @@ NTSTATUS newZwQueryMutant(HANDLE MutantHandle, MUTANT_INFORMATION_CLASS MutantIn
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryMutant(MutantHandle,MutantInformationClass,MutantInformation,MutantInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryMutant.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22842,7 +22906,7 @@ NTSTATUS newZwCreateIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK Desired
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22851,7 +22915,7 @@ NTSTATUS newZwCreateIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK Desired
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22890,7 +22954,7 @@ NTSTATUS newZwCreateIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK Desired
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateIoCompletion(IoCompletionHandle,DesiredAccess,ObjectAttributes,NumberOfConcurrentThreads);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateIoCompletion.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -22942,7 +23006,7 @@ NTSTATUS newZwOpenIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK DesiredAc
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -22951,7 +23015,7 @@ NTSTATUS newZwOpenIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK DesiredAc
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -22990,7 +23054,7 @@ NTSTATUS newZwOpenIoCompletion(PHANDLE IoCompletionHandle, ACCESS_MASK DesiredAc
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenIoCompletion(IoCompletionHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenIoCompletion.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23042,7 +23106,7 @@ NTSTATUS newZwSetIoCompletion(HANDLE IoCompletionHandle, ULONG CompletionKey, UL
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23051,7 +23115,7 @@ NTSTATUS newZwSetIoCompletion(HANDLE IoCompletionHandle, ULONG CompletionKey, UL
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23090,7 +23154,7 @@ NTSTATUS newZwSetIoCompletion(HANDLE IoCompletionHandle, ULONG CompletionKey, UL
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetIoCompletion(IoCompletionHandle,CompletionKey,CompletionValue,Status,Information);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetIoCompletion.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23142,7 +23206,7 @@ NTSTATUS newZwRemoveIoCompletion(HANDLE IoCompletionHandle, PULONG CompletionKey
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23151,7 +23215,7 @@ NTSTATUS newZwRemoveIoCompletion(HANDLE IoCompletionHandle, PULONG CompletionKey
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23190,7 +23254,7 @@ NTSTATUS newZwRemoveIoCompletion(HANDLE IoCompletionHandle, PULONG CompletionKey
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRemoveIoCompletion(IoCompletionHandle,CompletionKey,CompletionValue,IoStatusBlock,Timeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRemoveIoCompletion.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23242,7 +23306,7 @@ NTSTATUS newZwQueryIoCompletion(HANDLE IoCompletionHandle, IO_COMPLETION_INFORMA
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23251,7 +23315,7 @@ NTSTATUS newZwQueryIoCompletion(HANDLE IoCompletionHandle, IO_COMPLETION_INFORMA
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23290,7 +23354,7 @@ NTSTATUS newZwQueryIoCompletion(HANDLE IoCompletionHandle, IO_COMPLETION_INFORMA
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryIoCompletion(IoCompletionHandle,IoCompletionInformationClass,IoCompletionInformation,IoCompletionInformationLength,ResultLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryIoCompletion.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23342,7 +23406,7 @@ NTSTATUS newZwCreateEventPair(PHANDLE EventPairHandle, ACCESS_MASK DesiredAccess
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23351,7 +23415,7 @@ NTSTATUS newZwCreateEventPair(PHANDLE EventPairHandle, ACCESS_MASK DesiredAccess
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23390,7 +23454,7 @@ NTSTATUS newZwCreateEventPair(PHANDLE EventPairHandle, ACCESS_MASK DesiredAccess
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreateEventPair(EventPairHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreateEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23442,7 +23506,7 @@ NTSTATUS newZwOpenEventPair(PHANDLE EventPairHandle, ACCESS_MASK DesiredAccess, 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23451,7 +23515,7 @@ NTSTATUS newZwOpenEventPair(PHANDLE EventPairHandle, ACCESS_MASK DesiredAccess, 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23490,7 +23554,7 @@ NTSTATUS newZwOpenEventPair(PHANDLE EventPairHandle, ACCESS_MASK DesiredAccess, 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenEventPair(EventPairHandle,DesiredAccess,ObjectAttributes);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23542,7 +23606,7 @@ NTSTATUS newZwWaitLowEventPair(HANDLE EventPairHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23551,7 +23615,7 @@ NTSTATUS newZwWaitLowEventPair(HANDLE EventPairHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23590,7 +23654,7 @@ NTSTATUS newZwWaitLowEventPair(HANDLE EventPairHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwWaitLowEventPair(EventPairHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWaitLowEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23642,7 +23706,7 @@ NTSTATUS newZwWaitHighEventPair(HANDLE EventPairHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23651,7 +23715,7 @@ NTSTATUS newZwWaitHighEventPair(HANDLE EventPairHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23690,7 +23754,7 @@ NTSTATUS newZwWaitHighEventPair(HANDLE EventPairHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwWaitHighEventPair(EventPairHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwWaitHighEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23742,7 +23806,7 @@ NTSTATUS newZwSetLowWaitHighEventPair(HANDLE EventPairHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23751,7 +23815,7 @@ NTSTATUS newZwSetLowWaitHighEventPair(HANDLE EventPairHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23790,7 +23854,7 @@ NTSTATUS newZwSetLowWaitHighEventPair(HANDLE EventPairHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetLowWaitHighEventPair(EventPairHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetLowWaitHighEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23842,7 +23906,7 @@ NTSTATUS newZwSetHighWaitLowEventPair(HANDLE EventPairHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23851,7 +23915,7 @@ NTSTATUS newZwSetHighWaitLowEventPair(HANDLE EventPairHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23890,7 +23954,7 @@ NTSTATUS newZwSetHighWaitLowEventPair(HANDLE EventPairHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetHighWaitLowEventPair(EventPairHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetHighWaitLowEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -23942,7 +24006,7 @@ NTSTATUS newZwSetLowEventPair(HANDLE EventPairHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -23951,7 +24015,7 @@ NTSTATUS newZwSetLowEventPair(HANDLE EventPairHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -23990,7 +24054,7 @@ NTSTATUS newZwSetLowEventPair(HANDLE EventPairHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetLowEventPair(EventPairHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetLowEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24042,7 +24106,7 @@ NTSTATUS newZwSetHighEventPair(HANDLE EventPairHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24051,7 +24115,7 @@ NTSTATUS newZwSetHighEventPair(HANDLE EventPairHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24090,7 +24154,7 @@ NTSTATUS newZwSetHighEventPair(HANDLE EventPairHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetHighEventPair(EventPairHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetHighEventPair.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24142,7 +24206,7 @@ NTSTATUS newZwSetSystemTime(PLARGE_INTEGER NewTime, PLARGE_INTEGER OldTime){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24151,7 +24215,7 @@ NTSTATUS newZwSetSystemTime(PLARGE_INTEGER NewTime, PLARGE_INTEGER OldTime){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24190,7 +24254,7 @@ NTSTATUS newZwSetSystemTime(PLARGE_INTEGER NewTime, PLARGE_INTEGER OldTime){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetSystemTime(NewTime,OldTime);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetSystemTime.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24242,7 +24306,7 @@ NTSTATUS newZwQueryPerformanceCounter(PLARGE_INTEGER PerformanceCount, PLARGE_IN
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24251,7 +24315,7 @@ NTSTATUS newZwQueryPerformanceCounter(PLARGE_INTEGER PerformanceCount, PLARGE_IN
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24290,7 +24354,7 @@ NTSTATUS newZwQueryPerformanceCounter(PLARGE_INTEGER PerformanceCount, PLARGE_IN
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryPerformanceCounter(PerformanceCount,PerformanceFrequency);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryPerformanceCounter.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24342,7 +24406,7 @@ NTSTATUS newZwSetTimerResolution(ULONG RequestedResolution, BOOLEAN Set, PULONG 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24351,7 +24415,7 @@ NTSTATUS newZwSetTimerResolution(ULONG RequestedResolution, BOOLEAN Set, PULONG 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24390,7 +24454,7 @@ NTSTATUS newZwSetTimerResolution(ULONG RequestedResolution, BOOLEAN Set, PULONG 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetTimerResolution(RequestedResolution,Set,ActualResolution);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetTimerResolution.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24442,7 +24506,7 @@ NTSTATUS newZwQueryTimerResolution(PULONG CoarsestResolution, PULONG FinestResol
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24451,7 +24515,7 @@ NTSTATUS newZwQueryTimerResolution(PULONG CoarsestResolution, PULONG FinestResol
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24490,7 +24554,7 @@ NTSTATUS newZwQueryTimerResolution(PULONG CoarsestResolution, PULONG FinestResol
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryTimerResolution(CoarsestResolution,FinestResolution,ActualResolution);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryTimerResolution.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24542,7 +24606,7 @@ NTSTATUS newZwYieldExecution(){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24551,7 +24615,7 @@ NTSTATUS newZwYieldExecution(){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24590,7 +24654,7 @@ NTSTATUS newZwYieldExecution(){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwYieldExecution();
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwYieldExecution.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24642,7 +24706,7 @@ NTSTATUS newZwSetIntervalProfile(ULONG Interval, KPROFILE_SOURCE Source){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24651,7 +24715,7 @@ NTSTATUS newZwSetIntervalProfile(ULONG Interval, KPROFILE_SOURCE Source){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24690,7 +24754,7 @@ NTSTATUS newZwSetIntervalProfile(ULONG Interval, KPROFILE_SOURCE Source){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetIntervalProfile(Interval,Source);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetIntervalProfile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24742,7 +24806,7 @@ NTSTATUS newZwQueryIntervalProfile(KPROFILE_SOURCE Source, PULONG Interval){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24751,7 +24815,7 @@ NTSTATUS newZwQueryIntervalProfile(KPROFILE_SOURCE Source, PULONG Interval){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24790,7 +24854,7 @@ NTSTATUS newZwQueryIntervalProfile(KPROFILE_SOURCE Source, PULONG Interval){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryIntervalProfile(Source,Interval);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryIntervalProfile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24842,7 +24906,7 @@ NTSTATUS newZwStopProfile(HANDLE ProfileHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24851,7 +24915,7 @@ NTSTATUS newZwStopProfile(HANDLE ProfileHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24890,7 +24954,7 @@ NTSTATUS newZwStopProfile(HANDLE ProfileHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwStopProfile(ProfileHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwStopProfile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -24942,7 +25006,7 @@ NTSTATUS newZwPrivilegeCheck(HANDLE TokenHandle, PPRIVILEGE_SET RequiredPrivileg
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -24951,7 +25015,7 @@ NTSTATUS newZwPrivilegeCheck(HANDLE TokenHandle, PPRIVILEGE_SET RequiredPrivileg
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -24990,7 +25054,7 @@ NTSTATUS newZwPrivilegeCheck(HANDLE TokenHandle, PPRIVILEGE_SET RequiredPrivileg
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwPrivilegeCheck(TokenHandle,RequiredPrivileges,Result);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwPrivilegeCheck.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25042,7 +25106,7 @@ NTSTATUS newZwPrivilegeObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Han
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25051,7 +25115,7 @@ NTSTATUS newZwPrivilegeObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Han
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25090,7 +25154,7 @@ NTSTATUS newZwPrivilegeObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Han
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwPrivilegeObjectAuditAlarm(SubsystemName,HandleId,TokenHandle,DesiredAccess,Privileges,AccessGranted);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwPrivilegeObjectAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25142,7 +25206,7 @@ NTSTATUS newZwPrivilegedServiceAuditAlarm(PUNICODE_STRING SubsystemName, PUNICOD
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25151,7 +25215,7 @@ NTSTATUS newZwPrivilegedServiceAuditAlarm(PUNICODE_STRING SubsystemName, PUNICOD
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25190,7 +25254,7 @@ NTSTATUS newZwPrivilegedServiceAuditAlarm(PUNICODE_STRING SubsystemName, PUNICOD
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwPrivilegedServiceAuditAlarm(SubsystemName,ServiceName,TokenHandle,Privileges,AccessGranted);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwPrivilegedServiceAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25242,7 +25306,7 @@ NTSTATUS newZwAccessCheckByType(PSECURITY_DESCRIPTOR SecurityDescriptor, PSID Pr
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25251,7 +25315,7 @@ NTSTATUS newZwAccessCheckByType(PSECURITY_DESCRIPTOR SecurityDescriptor, PSID Pr
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25290,7 +25354,7 @@ NTSTATUS newZwAccessCheckByType(PSECURITY_DESCRIPTOR SecurityDescriptor, PSID Pr
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheckByType(SecurityDescriptor,PrincipalSelfSid,TokenHandle,DesiredAccess,ObjectTypeList,ObjectTypeListLength,GenericMapping,PrivilegeSet,PrivilegeSetLength,GrantedAccess,AccessStatus);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheckByType.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25342,7 +25406,7 @@ NTSTATUS newZwAccessCheckByTypeAndAuditAlarm(PUNICODE_STRING SubsystemName, PVOI
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25351,7 +25415,7 @@ NTSTATUS newZwAccessCheckByTypeAndAuditAlarm(PUNICODE_STRING SubsystemName, PVOI
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25390,7 +25454,7 @@ NTSTATUS newZwAccessCheckByTypeAndAuditAlarm(PUNICODE_STRING SubsystemName, PVOI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheckByTypeAndAuditAlarm(SubsystemName,HandleId,ObjectTypeName,ObjectName,SecurityDescriptor,PrincipalSelfSid,DesiredAccess,AuditType,Flags,ObjectTypeList,ObjectTypeListLength,GenericMapping,ObjectCreation,GrantedAccess,AccessStatus,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheckByTypeAndAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25442,7 +25506,7 @@ NTSTATUS newZwAccessCheckByTypeResultList(PSECURITY_DESCRIPTOR SecurityDescripto
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25451,7 +25515,7 @@ NTSTATUS newZwAccessCheckByTypeResultList(PSECURITY_DESCRIPTOR SecurityDescripto
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25490,7 +25554,7 @@ NTSTATUS newZwAccessCheckByTypeResultList(PSECURITY_DESCRIPTOR SecurityDescripto
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheckByTypeResultList(SecurityDescriptor,PrincipalSelfSid,TokenHandle,DesiredAccess,ObjectTypeList,ObjectTypeListLength,GenericMapping,PrivilegeSet,PrivilegeSetLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheckByTypeResultList.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25542,7 +25606,7 @@ NTSTATUS newZwAccessCheckByTypeResultListAndAuditAlarm(PUNICODE_STRING Subsystem
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25551,7 +25615,7 @@ NTSTATUS newZwAccessCheckByTypeResultListAndAuditAlarm(PUNICODE_STRING Subsystem
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25590,7 +25654,7 @@ NTSTATUS newZwAccessCheckByTypeResultListAndAuditAlarm(PUNICODE_STRING Subsystem
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheckByTypeResultListAndAuditAlarm(SubsystemName,HandleId,ObjectTypeName,ObjectName,SecurityDescriptor,PrincipalSelfSid,DesiredAccess,AuditType,Flags,ObjectTypeList,ObjectTypeListLength,GenericMapping,ObjectCreation,GrantedAccessList,AccessStatusList,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheckByTypeResultListAndAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25642,7 +25706,7 @@ NTSTATUS newZwAccessCheckByTypeResultListAndAuditAlarmByHandle(PUNICODE_STRING S
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25651,7 +25715,7 @@ NTSTATUS newZwAccessCheckByTypeResultListAndAuditAlarmByHandle(PUNICODE_STRING S
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25690,7 +25754,7 @@ NTSTATUS newZwAccessCheckByTypeResultListAndAuditAlarmByHandle(PUNICODE_STRING S
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAccessCheckByTypeResultListAndAuditAlarmByHandle(SubsystemName,HandleId,TokenHandle,ObjectTypeName,ObjectName,SecurityDescriptor,PrincipalSelfSid,DesiredAccess,AuditType,Flags,ObjectTypeList,ObjectTypeListLength,GenericMapping,ObjectCreation,GrantedAccessList,AccessStatusList,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAccessCheckByTypeResultListAndAuditAlarmByHandle.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25742,7 +25806,7 @@ NTSTATUS newZwOpenObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID *HandleI
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25751,7 +25815,7 @@ NTSTATUS newZwOpenObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID *HandleI
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25790,7 +25854,7 @@ NTSTATUS newZwOpenObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID *HandleI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwOpenObjectAuditAlarm(SubsystemName,HandleId,ObjectTypeName,ObjectName,SecurityDescriptor,TokenHandle,DesiredAccess,GrantedAccess,Privileges,ObjectCreation,AccessGranted,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwOpenObjectAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25842,7 +25906,7 @@ NTSTATUS newZwCloseObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID HandleI
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25851,7 +25915,7 @@ NTSTATUS newZwCloseObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID HandleI
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25890,7 +25954,7 @@ NTSTATUS newZwCloseObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID HandleI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCloseObjectAuditAlarm(SubsystemName,HandleId,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCloseObjectAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -25942,7 +26006,7 @@ NTSTATUS newZwDeleteObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Handle
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -25951,7 +26015,7 @@ NTSTATUS newZwDeleteObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Handle
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -25990,7 +26054,7 @@ NTSTATUS newZwDeleteObjectAuditAlarm(PUNICODE_STRING SubsystemName, PVOID Handle
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDeleteObjectAuditAlarm(SubsystemName,HandleId,GenerateOnClose);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDeleteObjectAuditAlarm.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26042,7 +26106,7 @@ NTSTATUS newZwRequestWakeupLatency(LATENCY_TIME Latency){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26051,7 +26115,7 @@ NTSTATUS newZwRequestWakeupLatency(LATENCY_TIME Latency){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26090,7 +26154,7 @@ NTSTATUS newZwRequestWakeupLatency(LATENCY_TIME Latency){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRequestWakeupLatency(Latency);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRequestWakeupLatency.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26142,7 +26206,7 @@ NTSTATUS newZwRequestDeviceWakeup(HANDLE DeviceHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26151,7 +26215,7 @@ NTSTATUS newZwRequestDeviceWakeup(HANDLE DeviceHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26190,7 +26254,7 @@ NTSTATUS newZwRequestDeviceWakeup(HANDLE DeviceHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRequestDeviceWakeup(DeviceHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRequestDeviceWakeup.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26242,7 +26306,7 @@ NTSTATUS newZwCancelDeviceWakeupRequest(HANDLE DeviceHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26251,7 +26315,7 @@ NTSTATUS newZwCancelDeviceWakeupRequest(HANDLE DeviceHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26290,7 +26354,7 @@ NTSTATUS newZwCancelDeviceWakeupRequest(HANDLE DeviceHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCancelDeviceWakeupRequest(DeviceHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCancelDeviceWakeupRequest.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26342,7 +26406,7 @@ NTSTATUS newZwIsSystemResumeAutomatic(){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26351,7 +26415,7 @@ NTSTATUS newZwIsSystemResumeAutomatic(){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26390,7 +26454,7 @@ NTSTATUS newZwIsSystemResumeAutomatic(){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwIsSystemResumeAutomatic();
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwIsSystemResumeAutomatic.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26442,7 +26506,7 @@ NTSTATUS newZwSetThreadExecutionState(EXECUTION_STATE ExecutionState, PEXECUTION
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26451,7 +26515,7 @@ NTSTATUS newZwSetThreadExecutionState(EXECUTION_STATE ExecutionState, PEXECUTION
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26490,7 +26554,7 @@ NTSTATUS newZwSetThreadExecutionState(EXECUTION_STATE ExecutionState, PEXECUTION
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetThreadExecutionState(ExecutionState,PreviousExecutionState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetThreadExecutionState.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26542,7 +26606,7 @@ NTSTATUS newZwGetDevicePowerState(HANDLE DeviceHandle, PDEVICE_POWER_STATE Devic
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26551,7 +26615,7 @@ NTSTATUS newZwGetDevicePowerState(HANDLE DeviceHandle, PDEVICE_POWER_STATE Devic
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26590,7 +26654,7 @@ NTSTATUS newZwGetDevicePowerState(HANDLE DeviceHandle, PDEVICE_POWER_STATE Devic
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwGetDevicePowerState(DeviceHandle,DevicePowerState);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwGetDevicePowerState.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26642,7 +26706,7 @@ NTSTATUS newZwSetSystemPowerState(POWER_ACTION SystemAction, SYSTEM_POWER_STATE 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26651,7 +26715,7 @@ NTSTATUS newZwSetSystemPowerState(POWER_ACTION SystemAction, SYSTEM_POWER_STATE 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26690,7 +26754,7 @@ NTSTATUS newZwSetSystemPowerState(POWER_ACTION SystemAction, SYSTEM_POWER_STATE 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetSystemPowerState(SystemAction,MinSystemState,Flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetSystemPowerState.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26742,7 +26806,7 @@ NTSTATUS newZwInitiatePowerAction(POWER_ACTION SystemAction, SYSTEM_POWER_STATE 
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26751,7 +26815,7 @@ NTSTATUS newZwInitiatePowerAction(POWER_ACTION SystemAction, SYSTEM_POWER_STATE 
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26790,7 +26854,7 @@ NTSTATUS newZwInitiatePowerAction(POWER_ACTION SystemAction, SYSTEM_POWER_STATE 
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwInitiatePowerAction(SystemAction,MinSystemState,Flags,Asynchronous);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwInitiatePowerAction.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26842,7 +26906,7 @@ NTSTATUS newZwPowerInformation(POWER_INFORMATION_LEVEL PowerInformationLevel, PV
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26851,7 +26915,7 @@ NTSTATUS newZwPowerInformation(POWER_INFORMATION_LEVEL PowerInformationLevel, PV
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -26890,7 +26954,7 @@ NTSTATUS newZwPowerInformation(POWER_INFORMATION_LEVEL PowerInformationLevel, PV
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwPowerInformation(PowerInformationLevel,InputBuffer,InputBufferLength,OutputBuffer,OutputBufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwPowerInformation.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -26922,7 +26986,7 @@ NTSTATUS newZwPowerInformation(POWER_INFORMATION_LEVEL PowerInformationLevel, PV
 }		
 NTSTATUS newZwRaiseException(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT Context, BOOLEAN SearchFrames){
 	NTSTATUS ntStatus;
-	WCHAR processString[150];
+	WCHAR processString[250];
 	WCHAR fullString[950];
 	WCHAR timeBuffer[150];
 	WCHAR pidBuffer[70];
@@ -26942,7 +27006,7 @@ NTSTATUS newZwRaiseException(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT Context
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -26981,7 +27045,7 @@ NTSTATUS newZwRaiseException(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT Context
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRaiseException.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27032,7 +27096,7 @@ NTSTATUS newZwRaiseException(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT Context
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27074,7 +27138,7 @@ NTSTATUS newZwRaiseException(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT Context
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwContinue.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27125,7 +27189,7 @@ NTSTATUS newZwCallbackReturn(PVOID Result, ULONG ResultLength, NTSTATUS Status){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27134,7 +27198,7 @@ NTSTATUS newZwCallbackReturn(PVOID Result, ULONG ResultLength, NTSTATUS Status){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27173,7 +27237,7 @@ NTSTATUS newZwCallbackReturn(PVOID Result, ULONG ResultLength, NTSTATUS Status){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCallbackReturn(Result,ResultLength,Status);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCallbackReturn.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27225,7 +27289,7 @@ NTSTATUS newZwLoadDriver(PUNICODE_STRING DriverServiceName){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27234,7 +27298,7 @@ NTSTATUS newZwLoadDriver(PUNICODE_STRING DriverServiceName){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27273,7 +27337,7 @@ NTSTATUS newZwLoadDriver(PUNICODE_STRING DriverServiceName){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwLoadDriver(DriverServiceName);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwLoadDriver.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27325,7 +27389,7 @@ NTSTATUS newZwUnloadDriver(PUNICODE_STRING DriverServiceName){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27334,7 +27398,7 @@ NTSTATUS newZwUnloadDriver(PUNICODE_STRING DriverServiceName){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27373,7 +27437,7 @@ NTSTATUS newZwUnloadDriver(PUNICODE_STRING DriverServiceName){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwUnloadDriver(DriverServiceName);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwUnloadDriver.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27425,7 +27489,7 @@ NTSTATUS newZwFlushWriteBuffer(){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27434,7 +27498,7 @@ NTSTATUS newZwFlushWriteBuffer(){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27473,7 +27537,7 @@ NTSTATUS newZwFlushWriteBuffer(){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFlushWriteBuffer();
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFlushWriteBuffer.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27525,7 +27589,7 @@ NTSTATUS newZwSetDefaultLocale(BOOLEAN ThreadOrSystem, LCID Locale){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27534,7 +27598,7 @@ NTSTATUS newZwSetDefaultLocale(BOOLEAN ThreadOrSystem, LCID Locale){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27573,7 +27637,7 @@ NTSTATUS newZwSetDefaultLocale(BOOLEAN ThreadOrSystem, LCID Locale){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetDefaultLocale(ThreadOrSystem,Locale);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetDefaultLocale.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27626,7 +27690,7 @@ NTSTATUS newZwQueryDefaultUILanguage(PLANGID LanguageId){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27635,7 +27699,7 @@ NTSTATUS newZwQueryDefaultUILanguage(PLANGID LanguageId){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27674,7 +27738,7 @@ NTSTATUS newZwQueryDefaultUILanguage(PLANGID LanguageId){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryDefaultUILanguage(LanguageId);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryDefaultUILanguage.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27726,7 +27790,7 @@ NTSTATUS newZwSetDefaultUILanguage(LANGID LanguageId){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27735,7 +27799,7 @@ NTSTATUS newZwSetDefaultUILanguage(LANGID LanguageId){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27774,7 +27838,7 @@ NTSTATUS newZwSetDefaultUILanguage(LANGID LanguageId){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetDefaultUILanguage(LanguageId);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetDefaultUILanguage.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27826,7 +27890,7 @@ NTSTATUS newZwQueryInstallUILanguage(PLANGID LanguageId){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27835,7 +27899,7 @@ NTSTATUS newZwQueryInstallUILanguage(PLANGID LanguageId){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27874,7 +27938,7 @@ NTSTATUS newZwQueryInstallUILanguage(PLANGID LanguageId){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryInstallUILanguage(LanguageId);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInstallUILanguage.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -27926,7 +27990,7 @@ NTSTATUS newZwAllocateLocallyUniqueId(PLUID Luid){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -27935,7 +27999,7 @@ NTSTATUS newZwAllocateLocallyUniqueId(PLUID Luid){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -27974,7 +28038,7 @@ NTSTATUS newZwAllocateLocallyUniqueId(PLUID Luid){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAllocateLocallyUniqueId(Luid);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAllocateLocallyUniqueId.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28026,7 +28090,7 @@ NTSTATUS newZwAllocateUuids(PLARGE_INTEGER UuidLastTimeAllocated, PULONG UuidDel
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28035,7 +28099,7 @@ NTSTATUS newZwAllocateUuids(PLARGE_INTEGER UuidLastTimeAllocated, PULONG UuidDel
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28074,7 +28138,7 @@ NTSTATUS newZwAllocateUuids(PLARGE_INTEGER UuidLastTimeAllocated, PULONG UuidDel
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAllocateUuids(UuidLastTimeAllocated,UuidDeltaTime,UuidSequenceNumber,UuidSeed);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAllocateUuids.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28126,7 +28190,7 @@ NTSTATUS newZwSetUuidSeed(PUCHAR UuidSeed){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28135,7 +28199,7 @@ NTSTATUS newZwSetUuidSeed(PUCHAR UuidSeed){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28174,7 +28238,7 @@ NTSTATUS newZwSetUuidSeed(PUCHAR UuidSeed){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetUuidSeed(UuidSeed);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetUuidSeed.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28226,7 +28290,7 @@ NTSTATUS newZwRaiseHardError(NTSTATUS Status, ULONG NumberOfArguments, ULONG Str
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28235,7 +28299,7 @@ NTSTATUS newZwRaiseHardError(NTSTATUS Status, ULONG NumberOfArguments, ULONG Str
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28274,7 +28338,7 @@ NTSTATUS newZwRaiseHardError(NTSTATUS Status, ULONG NumberOfArguments, ULONG Str
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwRaiseHardError(Status,NumberOfArguments,StringArgumentsMask,Arguments,ResponseOption,Response);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwRaiseHardError.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28326,7 +28390,7 @@ NTSTATUS newZwSetDefaultHardErrorPort(HANDLE PortHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28335,7 +28399,7 @@ NTSTATUS newZwSetDefaultHardErrorPort(HANDLE PortHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28374,7 +28438,7 @@ NTSTATUS newZwSetDefaultHardErrorPort(HANDLE PortHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetDefaultHardErrorPort(PortHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetDefaultHardErrorPort.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28426,7 +28490,7 @@ NTSTATUS newZwDisplayString(PUNICODE_STRING String){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28435,7 +28499,7 @@ NTSTATUS newZwDisplayString(PUNICODE_STRING String){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28474,7 +28538,7 @@ NTSTATUS newZwDisplayString(PUNICODE_STRING String){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDisplayString(String);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDisplayString.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28526,7 +28590,7 @@ NTSTATUS newZwCreatePagingFile(PUNICODE_STRING FileName, PULARGE_INTEGER Initial
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28535,7 +28599,7 @@ NTSTATUS newZwCreatePagingFile(PUNICODE_STRING FileName, PULARGE_INTEGER Initial
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28574,7 +28638,7 @@ NTSTATUS newZwCreatePagingFile(PUNICODE_STRING FileName, PULARGE_INTEGER Initial
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwCreatePagingFile(FileName,InitialSize,MaximumSize,Reserved);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwCreatePagingFile.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28626,7 +28690,7 @@ NTSTATUS newZwAddAtom(PWSTR String, ULONG StringLength, PUSHORT Atom){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28635,7 +28699,7 @@ NTSTATUS newZwAddAtom(PWSTR String, ULONG StringLength, PUSHORT Atom){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28674,7 +28738,7 @@ NTSTATUS newZwAddAtom(PWSTR String, ULONG StringLength, PUSHORT Atom){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwAddAtom(String,StringLength,Atom);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwAddAtom.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28726,7 +28790,7 @@ NTSTATUS newZwFindAtom(PWSTR String, ULONG StringLength, PUSHORT Atom){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28735,7 +28799,7 @@ NTSTATUS newZwFindAtom(PWSTR String, ULONG StringLength, PUSHORT Atom){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28774,7 +28838,7 @@ NTSTATUS newZwFindAtom(PWSTR String, ULONG StringLength, PUSHORT Atom){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwFindAtom(String,StringLength,Atom);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwFindAtom.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28826,7 +28890,7 @@ NTSTATUS newZwDeleteAtom(USHORT Atom){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28835,7 +28899,7 @@ NTSTATUS newZwDeleteAtom(USHORT Atom){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28874,7 +28938,7 @@ NTSTATUS newZwDeleteAtom(USHORT Atom){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwDeleteAtom(Atom);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwDeleteAtom.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -28926,7 +28990,7 @@ NTSTATUS newZwQueryInformationAtom(USHORT Atom, ATOM_INFORMATION_CLASS AtomInfor
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -28935,7 +28999,7 @@ NTSTATUS newZwQueryInformationAtom(USHORT Atom, ATOM_INFORMATION_CLASS AtomInfor
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -28974,7 +29038,7 @@ NTSTATUS newZwQueryInformationAtom(USHORT Atom, ATOM_INFORMATION_CLASS AtomInfor
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwQueryInformationAtom(Atom,AtomInformationClass,AtomInformation,AtomInformationLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwQueryInformationAtom.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29026,7 +29090,7 @@ NTSTATUS newZwSetLdtEntries(ULONG Selector1, LDT_ENTRY LdtEntry1, ULONG Selector
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29035,7 +29099,7 @@ NTSTATUS newZwSetLdtEntries(ULONG Selector1, LDT_ENTRY LdtEntry1, ULONG Selector
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29074,7 +29138,7 @@ NTSTATUS newZwSetLdtEntries(ULONG Selector1, LDT_ENTRY LdtEntry1, ULONG Selector
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwSetLdtEntries(Selector1,LdtEntry1,Selector2,LdtEntry2);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwSetLdtEntries.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29126,7 +29190,7 @@ NTSTATUS newZwVdmControl(ULONG ControlCode, PVOID ControlData){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29135,7 +29199,7 @@ NTSTATUS newZwVdmControl(ULONG ControlCode, PVOID ControlData){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29174,7 +29238,7 @@ NTSTATUS newZwVdmControl(ULONG ControlCode, PVOID ControlData){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldZwVdmControl(ControlCode,ControlData);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwVdmControl.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29226,7 +29290,7 @@ NTSTATUS newNtSetBootEntryOrder(PULONG Ids,PULONG Count){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29235,7 +29299,7 @@ NTSTATUS newNtSetBootEntryOrder(PULONG Ids,PULONG Count){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29274,7 +29338,7 @@ NTSTATUS newNtSetBootEntryOrder(PULONG Ids,PULONG Count){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtSetBootEntryOrder(Ids,Count);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtSetBootEntryOrder.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29326,7 +29390,7 @@ NTSTATUS newNtCompactKeys(ULONG NrOfKeys, HANDLE KeysArray[]){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29335,7 +29399,7 @@ NTSTATUS newNtCompactKeys(ULONG NrOfKeys, HANDLE KeysArray[]){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29374,7 +29438,7 @@ NTSTATUS newNtCompactKeys(ULONG NrOfKeys, HANDLE KeysArray[]){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtCompactKeys(NrOfKeys,KeysArray);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtCompactKeys.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29426,7 +29490,7 @@ NTSTATUS newNtCompareTokens(HANDLE FirstTokenHandle, HANDLE SecondTokenHandle, P
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29435,7 +29499,7 @@ NTSTATUS newNtCompareTokens(HANDLE FirstTokenHandle, HANDLE SecondTokenHandle, P
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29474,7 +29538,7 @@ NTSTATUS newNtCompareTokens(HANDLE FirstTokenHandle, HANDLE SecondTokenHandle, P
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtCompareTokens(FirstTokenHandle,SecondTokenHandle,Equal);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtCompareTokens.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29526,7 +29590,7 @@ NTSTATUS newNtCompressKey(HANDLE Key){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29535,7 +29599,7 @@ NTSTATUS newNtCompressKey(HANDLE Key){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29574,7 +29638,7 @@ NTSTATUS newNtCompressKey(HANDLE Key){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtCompressKey(Key);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtCompressKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29626,7 +29690,7 @@ NTSTATUS newNtCreateDebugObject(PHANDLE DebugObjectHandle, ACCESS_MASK DesiredAc
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29635,7 +29699,7 @@ NTSTATUS newNtCreateDebugObject(PHANDLE DebugObjectHandle, ACCESS_MASK DesiredAc
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29674,7 +29738,7 @@ NTSTATUS newNtCreateDebugObject(PHANDLE DebugObjectHandle, ACCESS_MASK DesiredAc
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtCreateDebugObject(DebugObjectHandle,DesiredAccess,ObjectAttributes,Flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtCreateDebugObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29726,7 +29790,7 @@ NTSTATUS newNtCreateJobSet(ULONG NumJob, PJOB_SET_ARRAY UserJobSet, ULONG Flags)
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29735,7 +29799,7 @@ NTSTATUS newNtCreateJobSet(ULONG NumJob, PJOB_SET_ARRAY UserJobSet, ULONG Flags)
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29774,7 +29838,7 @@ NTSTATUS newNtCreateJobSet(ULONG NumJob, PJOB_SET_ARRAY UserJobSet, ULONG Flags)
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtCreateJobSet(NumJob,UserJobSet,Flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtCreateJobSet.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29826,7 +29890,7 @@ NTSTATUS newNtDebugActiveProcess(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29835,7 +29899,7 @@ NTSTATUS newNtDebugActiveProcess(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29874,7 +29938,7 @@ NTSTATUS newNtDebugActiveProcess(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtDebugActiveProcess(ProcessHandle,DebugObjectHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtDebugActiveProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -29926,7 +29990,7 @@ NTSTATUS newNtDebugContinue(HANDLE DebugObject, PCLIENT_ID AppClientId, NTSTATUS
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -29935,7 +29999,7 @@ NTSTATUS newNtDebugContinue(HANDLE DebugObject, PCLIENT_ID AppClientId, NTSTATUS
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -29974,7 +30038,7 @@ NTSTATUS newNtDebugContinue(HANDLE DebugObject, PCLIENT_ID AppClientId, NTSTATUS
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtDebugContinue(DebugObject, AppClientId, ContinueStatus);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtDebugContinue.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30026,7 +30090,7 @@ NTSTATUS newNtEnumerateSystemEnvironmentValuesEx(ULONG InformationClass, PVOID B
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30035,7 +30099,7 @@ NTSTATUS newNtEnumerateSystemEnvironmentValuesEx(ULONG InformationClass, PVOID B
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30074,7 +30138,7 @@ NTSTATUS newNtEnumerateSystemEnvironmentValuesEx(ULONG InformationClass, PVOID B
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtEnumerateSystemEnvironmentValuesEx(InformationClass,Buffer,BufferLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtEnumerateSystemEnvironmentValuesEx.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30126,7 +30190,7 @@ NTSTATUS newNtIsProcessInJob(HANDLE ProcessHandle,HANDLE JobHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30135,7 +30199,7 @@ NTSTATUS newNtIsProcessInJob(HANDLE ProcessHandle,HANDLE JobHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30174,7 +30238,7 @@ NTSTATUS newNtIsProcessInJob(HANDLE ProcessHandle,HANDLE JobHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtIsProcessInJob(ProcessHandle,JobHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtIsProcessInJob.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30226,7 +30290,7 @@ NTSTATUS newNtLockProductActivationKeys(PULONG pPrivateVer, PULONG pSafeMode){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30235,7 +30299,7 @@ NTSTATUS newNtLockProductActivationKeys(PULONG pPrivateVer, PULONG pSafeMode){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30274,7 +30338,7 @@ NTSTATUS newNtLockProductActivationKeys(PULONG pPrivateVer, PULONG pSafeMode){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtLockProductActivationKeys(pPrivateVer,pSafeMode);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtLockProductActivationKeys.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30326,7 +30390,7 @@ NTSTATUS newNtLockRegistryKey(HANDLE KeyHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30335,7 +30399,7 @@ NTSTATUS newNtLockRegistryKey(HANDLE KeyHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30374,7 +30438,7 @@ NTSTATUS newNtLockRegistryKey(HANDLE KeyHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtLockRegistryKey(KeyHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtLockRegistryKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30426,7 +30490,7 @@ NTSTATUS newNtMakePermanentObject(HANDLE ObjectHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30435,7 +30499,7 @@ NTSTATUS newNtMakePermanentObject(HANDLE ObjectHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30474,7 +30538,7 @@ NTSTATUS newNtMakePermanentObject(HANDLE ObjectHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtMakePermanentObject(ObjectHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtMakePermanentObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30526,7 +30590,7 @@ NTSTATUS newNtDeleteBootEntry(ULONG Id){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30535,7 +30599,7 @@ NTSTATUS newNtDeleteBootEntry(ULONG Id){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30574,7 +30638,7 @@ NTSTATUS newNtDeleteBootEntry(ULONG Id){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtDeleteBootEntry(Id);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtDeleteBootEntry.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30626,7 +30690,7 @@ NTSTATUS newNtQueryDebugFilterState(ULONG ComponentId, ULONG Level){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30635,7 +30699,7 @@ NTSTATUS newNtQueryDebugFilterState(ULONG ComponentId, ULONG Level){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30674,7 +30738,7 @@ NTSTATUS newNtQueryDebugFilterState(ULONG ComponentId, ULONG Level){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtQueryDebugFilterState(ComponentId,Level);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtQueryDebugFilterState.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30726,7 +30790,7 @@ NTSTATUS newNtRemoveProcessDebug(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30735,7 +30799,7 @@ NTSTATUS newNtRemoveProcessDebug(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30774,7 +30838,7 @@ NTSTATUS newNtRemoveProcessDebug(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtRemoveProcessDebug(ProcessHandle,DebugObjectHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtRemoveProcessDebug.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30826,7 +30890,7 @@ NTSTATUS newNtRenameKey(HANDLE KeyHandle, PUNICODE_STRING NewName){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30835,7 +30899,7 @@ NTSTATUS newNtRenameKey(HANDLE KeyHandle, PUNICODE_STRING NewName){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30874,7 +30938,7 @@ NTSTATUS newNtRenameKey(HANDLE KeyHandle, PUNICODE_STRING NewName){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtRenameKey(KeyHandle,NewName);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtRenameKey.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -30926,7 +30990,7 @@ NTSTATUS newNtResumeProcess(HANDLE ProcessHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -30935,7 +30999,7 @@ NTSTATUS newNtResumeProcess(HANDLE ProcessHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -30974,7 +31038,7 @@ NTSTATUS newNtResumeProcess(HANDLE ProcessHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtResumeProcess(ProcessHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtResumeProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31026,7 +31090,7 @@ NTSTATUS newNtSetDebugFilterState(ULONG ComponentId, ULONG Level, BOOLEAN State)
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31035,7 +31099,7 @@ NTSTATUS newNtSetDebugFilterState(ULONG ComponentId, ULONG Level, BOOLEAN State)
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31074,7 +31138,7 @@ NTSTATUS newNtSetDebugFilterState(ULONG ComponentId, ULONG Level, BOOLEAN State)
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtSetDebugFilterState(ComponentId,Level,State);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtSetDebugFilterState.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31126,7 +31190,7 @@ NTSTATUS newNtSetEventBoostPriority(HANDLE EventHandle){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31135,7 +31199,7 @@ NTSTATUS newNtSetEventBoostPriority(HANDLE EventHandle){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31174,7 +31238,7 @@ NTSTATUS newNtSetEventBoostPriority(HANDLE EventHandle){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtSetEventBoostPriority(EventHandle);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtSetEventBoostPriority.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31226,7 +31290,7 @@ NTSTATUS newNtSetInformationDebugObject(HANDLE DebugObjectHandle, DEBUGOBJECTINF
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31235,7 +31299,7 @@ NTSTATUS newNtSetInformationDebugObject(HANDLE DebugObjectHandle, DEBUGOBJECTINF
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31274,7 +31338,7 @@ NTSTATUS newNtSetInformationDebugObject(HANDLE DebugObjectHandle, DEBUGOBJECTINF
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtSetInformationDebugObject(DebugObjectHandle,DebugObjectInformationClass,DebugInformation,DebugInformationLength,ReturnLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtSetInformationDebugObject.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31326,7 +31390,7 @@ NTSTATUS newNtSuspendProcess(HANDLE Process){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31335,7 +31399,7 @@ NTSTATUS newNtSuspendProcess(HANDLE Process){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31374,7 +31438,7 @@ NTSTATUS newNtSuspendProcess(HANDLE Process){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtSuspendProcess(Process);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtSuspendProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31426,7 +31490,7 @@ NTSTATUS newNtTraceEvent(HANDLE TraceHandle, ULONG Flags, ULONG FieldSize, PVOID
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31435,7 +31499,7 @@ NTSTATUS newNtTraceEvent(HANDLE TraceHandle, ULONG Flags, ULONG FieldSize, PVOID
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31474,7 +31538,7 @@ NTSTATUS newNtTraceEvent(HANDLE TraceHandle, ULONG Flags, ULONG FieldSize, PVOID
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtTraceEvent(TraceHandle,Flags,FieldSize,Fields);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtTraceEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31526,7 +31590,7 @@ NTSTATUS newNtTranslateFilePath(PFILE_PATH InputFilePath, ULONG OutputType, PFIL
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31535,7 +31599,7 @@ NTSTATUS newNtTranslateFilePath(PFILE_PATH InputFilePath, ULONG OutputType, PFIL
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31574,7 +31638,7 @@ NTSTATUS newNtTranslateFilePath(PFILE_PATH InputFilePath, ULONG OutputType, PFIL
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtTranslateFilePath(InputFilePath,OutputType,OutputFilePath,OutputFilePathLength);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtTranslateFilePath.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31626,7 +31690,7 @@ NTSTATUS newNtWaitForDebugEvent(HANDLE DebugObjectHandle, BOOLEAN Alertable, PLA
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31635,7 +31699,7 @@ NTSTATUS newNtWaitForDebugEvent(HANDLE DebugObjectHandle, BOOLEAN Alertable, PLA
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31674,7 +31738,7 @@ NTSTATUS newNtWaitForDebugEvent(HANDLE DebugObjectHandle, BOOLEAN Alertable, PLA
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtWaitForDebugEvent(DebugObjectHandle,Alertable,Timeout,WaitStateChange);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtWaitForDebugEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31726,7 +31790,7 @@ NTSTATUS newNtCreateKeyedEvent(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRI
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31735,7 +31799,7 @@ NTSTATUS newNtCreateKeyedEvent(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRI
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31774,7 +31838,7 @@ NTSTATUS newNtCreateKeyedEvent(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRI
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtCreateKeyedEvent(handle,access,attr,flags);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtCreateKeyedEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31826,7 +31890,7 @@ NTSTATUS newNtOpenKeyedEvent(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBU
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31835,7 +31899,7 @@ NTSTATUS newNtOpenKeyedEvent(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBU
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31874,7 +31938,7 @@ NTSTATUS newNtOpenKeyedEvent(PHANDLE handle, ACCESS_MASK access, POBJECT_ATTRIBU
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtOpenKeyedEvent(handle,access,attr);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtOpenKeyedEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -31926,7 +31990,7 @@ NTSTATUS newNtReleaseKeyedEvent(HANDLE handle, PVOID key, BOOLEAN alertable, PLA
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -31935,7 +31999,7 @@ NTSTATUS newNtReleaseKeyedEvent(HANDLE handle, PVOID key, BOOLEAN alertable, PLA
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -31974,7 +32038,7 @@ NTSTATUS newNtReleaseKeyedEvent(HANDLE handle, PVOID key, BOOLEAN alertable, PLA
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtReleaseKeyedEvent(handle,key,alertable,mstimeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtReleaseKeyedEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -32026,7 +32090,7 @@ NTSTATUS newNtWaitForKeyedEvent(HANDLE handle, PVOID key, BOOLEAN alertable, PLA
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -32035,7 +32099,7 @@ NTSTATUS newNtWaitForKeyedEvent(HANDLE handle, PVOID key, BOOLEAN alertable, PLA
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -32074,7 +32138,7 @@ NTSTATUS newNtWaitForKeyedEvent(HANDLE handle, PVOID key, BOOLEAN alertable, PLA
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtWaitForKeyedEvent(handle,key,alertable,mstimeout);
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtWaitForKeyedEvent.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");
@@ -32126,7 +32190,7 @@ NTSTATUS newNtQueryPortInformationProcess(){
 	
 	ANSI_STRING ansiTime;
 	counter+=1;
-	uProcess.MaximumLength = 150 * sizeof(WCHAR);
+	uProcess.MaximumLength = 250 * sizeof(WCHAR);
 	uFullString.MaximumLength = 950 * sizeof(WCHAR);
 	uPid.MaximumLength = 70 * sizeof(WCHAR);
 	
@@ -32135,7 +32199,7 @@ NTSTATUS newNtQueryPortInformationProcess(){
 	uFullString.Length = 0;
 	
 	pidBuffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 70, 'idpb');
-	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 150, 'icpr');
+	processString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 250, 'icpr');
 	fullString = (PWCHAR)ExAllocatePoolWithTag(PagedPool, sizeof(WCHAR) * 950, 'icfs');
 	if (fullString == NULL) {
 		DbgPrint("I was null in newZwProtectVirtualMemory \r\n");
@@ -32174,7 +32238,7 @@ NTSTATUS newNtQueryPortInformationProcess(){
 	//ntStatus = oldZwMapViewOfSection(SectionHandle,ProcessHandle,BaseAddress,ZeroBits,CommitSize,SectionOffset,ViewSize,InheritDisposition,AllocationType,Win32Protect);
 	ntStatus = oldNtQueryPortInformationProcess();
 	
-	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 150);
+	RtlInitEmptyUnicodeString(&uProcess, processString, sizeof(WCHAR) * 250);
 	//RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\ZwMapViewOfSection.txt");
 	RtlAppendUnicodeToString(&uProcess, L"\\SystemRoot\\d\\NtQueryPortInformationProcess.txt");
 	RtlAppendUnicodeToString(&uFullString, L"\r\n\0");

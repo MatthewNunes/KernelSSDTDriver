@@ -70,6 +70,15 @@ mydriver.c and ..\mydriver.c exist
 1> /FIC:\WinDDK\7600.16385.1\inc\api\warning.h
 1> .\mydriver.c 
 1>mydriver.c
+1>c:\hookssdt\mydriver.c(5370) : warning C4996: 'ExAllocatePool': was declared deprecated
+1>warnings in directory c:\hookssdt
+1>c:\hookssdt\mydriver.c(5370) : warning C4996: 'ExAllocatePool': was declared deprecated
+1> c:\winddk\7600.16385.1\inc\ddk\wdm.h(16147) : see declaration of 'ExAllocatePool'
+1>c:\hookssdt\mydriver.c(9555) : warning C4996: 'ExAllocatePool': was declared deprecated
+1>c:\hookssdt\mydriver.c(9555) : warning C4996: 'ExAllocatePool': was declared deprecated
+1> c:\winddk\7600.16385.1\inc\ddk\wdm.h(16147) : see declaration of 'ExAllocatePool'
+1>c:\hookssdt\mydriver.c(16096) : warning C4047: '!=' : 'int' differs in levels of indirection from 'void *'
+1>c:\hookssdt\mydriver.c(16096) : warning C4047: '!=' : 'int' differs in levels of indirection from 'void *'
 1> C:\WinDDK\7600.16385.1\Bin\x86\oacr\oacrlink /out:c:\hookssdt\objchk_wxp_x86\i386\hookssdt.sys /machine:ix86 @c:\hookssdt\objchk_wxp_x86\i386\lnk.rsp
 1>Microsoft (R) Incremental Linker Version 9.00.30729.207
 1>Copyright (C) Microsoft Corporation.  All rights reserved.
